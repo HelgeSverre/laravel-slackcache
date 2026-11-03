@@ -30,3 +30,16 @@ it('spreads keys over every shard', function () {
 
     expect($shards)->toBe(range(0, 7));
 });
+
+// The examples from the Redis Cluster specification's hash tag rules.
+it('follows Redis hash tag rules', function (string $key, string $hashed) {
+    expect(KeySlot::for($key))->toBe(KeySlot::crc16($hashed) % KeySlot::SLOTS);
+})->with([
+    'first braces' => ['foo{bar}{zap}', 'bar'],
+    'empty first tag: whole key' => ['foo{}{bar}', 'foo{}{bar}'],
+    'nested open brace' => ['foo{{bar}}zap', '{bar'],
+    'close brace before open' => ['}{a}', 'a'],
+    'one-character tag' => ['{a}bc', 'a'],
+    'no close brace' => ['{abc', '{abc'],
+    'tag at the end' => ['user:{42}', '42'],
+]);
