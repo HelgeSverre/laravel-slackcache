@@ -19,10 +19,12 @@
     ],
     "require": {
         "php": "^8.3",
+        "illuminate/bus": "^12.40||^13.0",
         "illuminate/cache": "^12.40||^13.0",
         "illuminate/console": "^12.40||^13.0",
         "illuminate/contracts": "^12.40||^13.0",
         "illuminate/http": "^12.40||^13.0",
+        "illuminate/queue": "^12.40||^13.0",
         "illuminate/support": "^12.40||^13.0",
         "spatie/laravel-package-tools": "^1.16"
     },

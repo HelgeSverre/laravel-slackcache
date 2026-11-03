@@ -14,6 +14,7 @@ use HelgeSverre\SlackCache\Slack\SlackApi;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\CacheManager;
 use Illuminate\Cache\Repository;
+use Illuminate\Contracts\Bus\Dispatcher as BusDispatcher;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Encryption\StringEncrypter;
 use Illuminate\Contracts\Events\Dispatcher;
@@ -133,13 +134,46 @@ class SlackCacheServiceProvider extends PackageServiceProvider
         $prefix = (string) ($config['prefix'] ?? $app->make(ConfigRepository::class)->get('cache.prefix', ''));
         $lockChannel = isset($config['lock_channel']) ? ltrim((string) $config['lock_channel'], '#') : null;
 
+        $keyspace = self::keyspace($api, $replica, $channels, $config, (bool) ($config['history'] ?? false));
+        self::configureQueue($app, $keyspace, $config);
+
         return new SlackStore(
-            self::keyspace($api, $replica, $channels, $config, (bool) ($config['history'] ?? false)),
+            $keyspace,
             $prefix,
             $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
             $lockChannel === null ? null : new SlackStore(self::keyspace($api, $replica, [$lockChannel], $config), $prefix),
             ($config['encrypt'] ?? false) ? $app->make(StringEncrypter::class) : null,
             self::compression($config),
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $config
+     */
+    protected static function configureQueue(Application $app, Keyspace $keyspace, array $config): void
+    {
+        $async = (bool) ($config['async'] ?? false);
+        $sync = (string) ($config['sync'] ?? 'inline');
+
+        if (! in_array($sync, ['inline', 'background'], true)) {
+            throw new SlackCacheException("The slack cache store's sync option must be 'inline' or 'background', not [{$sync}].");
+        }
+
+        if ($async && ($config['history'] ?? false)) {
+            throw new SlackCacheException('The slack cache store cannot combine async with history: thread replies need each write to see the one before it.');
+        }
+
+        if (! $async && $sync === 'inline') {
+            return;
+        }
+
+        $keyspace->useQueue(
+            fn (object $job) => $app->make(BusDispatcher::class)->dispatch($job),
+            (string) ($config['store'] ?? 'slack'),
+            isset($config['queue_connection']) ? (string) $config['queue_connection'] : null,
+            isset($config['queue']) ? (string) $config['queue'] : null,
+            async: $async,
+            backgroundSync: $sync === 'background',
         );
     }
 

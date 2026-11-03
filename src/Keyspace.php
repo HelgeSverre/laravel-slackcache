@@ -6,6 +6,7 @@ use Closure;
 use HelgeSverre\SlackCache\Events\HistoryReplyFailed;
 use HelgeSverre\SlackCache\Events\KeyspaceReloaded;
 use HelgeSverre\SlackCache\Exceptions\SlackApiException;
+use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
 use HelgeSverre\SlackCache\Exceptions\TextMismatchException;
 use HelgeSverre\SlackCache\Slack\Channel;
 use HelgeSverre\SlackCache\Slack\ChannelResolver;
@@ -32,6 +33,21 @@ class Keyspace
 
     /** @var (Closure(string): string)|null */
     protected ?Closure $previewer = null;
+
+    /** @var (Closure(object): mixed)|null Dispatches a queued job. */
+    protected ?Closure $dispatcher = null;
+
+    protected string $storeName = 'slack';
+
+    protected ?string $queueConnection = null;
+
+    protected ?string $queue = null;
+
+    /** Write-behind: write the replica now and Slack from a queued job. */
+    protected bool $async = false;
+
+    /** Re-sync a stale replica from a queued job instead of during the read. */
+    protected bool $backgroundSync = false;
 
     protected readonly string $namespace;
 
@@ -63,6 +79,26 @@ class Keyspace
         $this->previewer = $previewer;
     }
 
+    /**
+     * Use the queue for write-behind and/or background re-syncs.
+     *
+     * @param  Closure(object): mixed  $dispatcher
+     */
+    public function useQueue(Closure $dispatcher, string $storeName, ?string $connection = null, ?string $queue = null, bool $async = false, bool $backgroundSync = false): void
+    {
+        $this->dispatcher = $dispatcher;
+        $this->storeName = $storeName;
+        $this->queueConnection = $connection;
+        $this->queue = $queue;
+        $this->async = $async;
+        $this->backgroundSync = $backgroundSync;
+    }
+
+    public function isAsync(): bool
+    {
+        return $this->async;
+    }
+
     public function get(string $key): ?Entry
     {
         $this->ensureLoaded();
@@ -80,6 +116,10 @@ class Keyspace
      */
     public function write(string $key, string $value, ?int $expireAt, ?string $preview = null, array $tags = []): Entry
     {
+        if ($this->async) {
+            return $this->writeLater($key, $value, $expireAt, $preview, $tags);
+        }
+
         $old = $this->get($key);
         [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
 
@@ -110,6 +150,171 @@ class Keyspace
         }
 
         return $entry;
+    }
+
+    /**
+     * Write-behind: remember the value as pending and queue the Slack write.
+     *
+     * @param  list<string>  $tags
+     */
+    protected function writeLater(string $key, string $value, ?int $expireAt, ?string $preview, array $tags): Entry
+    {
+        $this->ensureLoaded();
+
+        // The message this write will replace: the current entry's, or a deleted entry's not yet removed from Slack.
+        $raw = $this->raw($key);
+        $replaces = $raw instanceof Entry ? $raw->ts : (is_array($raw) ? $raw[1] : '');
+
+        $seq = $this->nextSeq();
+        $entry = new Entry($key, $replaces, $value, $expireAt, $this->shardFor($key), $seq, pending: true);
+
+        foreach ($this->liveGenerations() as $generation) {
+            $this->remember($generation, $entry);
+        }
+
+        $this->queueJob(new Jobs\WriteToSlack($this->storeName, $key, $value, $expireAt, $preview, $tags, $seq));
+
+        return $entry;
+    }
+
+    /**
+     * Write-behind: hide the key now and queue the Slack delete.
+     */
+    protected function removeLater(string $key): bool
+    {
+        $entry = $this->get($key);
+
+        if ($entry === null) {
+            return false;
+        }
+
+        $seq = $this->nextSeq();
+
+        foreach ($this->liveGenerations() as $generation) {
+            $this->replica->put($this->entryKey($key, $generation), ['deleted', $entry->ts, $seq], $this->tombstoneTtl());
+        }
+
+        $this->queueJob(new Jobs\DeleteFromSlack($this->storeName, $key, $seq));
+
+        return true;
+    }
+
+    /**
+     * Run by WriteToSlack: post a queued write, unless something newer has happened to the key since.
+     *
+     * @param  list<string>  $tags
+     */
+    public function commitWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, int $seq): void
+    {
+        $this->atomically($key, function () use ($key, $value, $expireAt, $preview, $tags, $seq) {
+            if ($seq <= $this->flushedSeq()) {
+                return; // Written before a flush.
+            }
+
+            $raw = $this->raw($key);
+
+            if ($raw instanceof Entry && $raw->seq > $seq) {
+                return; // A newer write is pending or committed; it carries its own value.
+            }
+
+            if (is_array($raw) && $raw[2] > $seq) {
+                return; // Deleted after this write; the delete job removes the message.
+            }
+
+            $replaces = $raw instanceof Entry ? $raw->ts : (is_array($raw) ? $raw[1] : '');
+            $shard = $this->shardFor($key);
+            [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
+            $ts = $this->channels()[$shard]->post($text, $blocks);
+
+            foreach ($this->liveGenerations() as $generation) {
+                $this->remember($generation, new Entry($key, $ts, $value, $expireAt, $shard, $seq));
+            }
+
+            if ($replaces !== '' && $replaces !== $ts) {
+                $this->deleteMessage($this->channel($raw instanceof Entry ? $raw->shard : $shard), $replaces);
+            }
+        });
+    }
+
+    /**
+     * Run by DeleteFromSlack: delete a queued delete's message, unless the key was written again since.
+     */
+    public function commitDelete(string $key, int $seq): void
+    {
+        $this->atomically($key, function () use ($key, $seq) {
+            if ($seq <= $this->flushedSeq()) {
+                return;
+            }
+
+            $raw = $this->raw($key);
+
+            // A newer write took over the message to replace; it deletes it when it posts.
+            if (! is_array($raw) || $raw[2] !== $seq || $raw[1] === '') {
+                return;
+            }
+
+            $this->deleteMessage($this->channel($this->shardFor($key)), $raw[1]);
+
+            foreach ($this->liveGenerations() as $generation) {
+                $this->replica->put($this->entryKey($key, $generation), ['deleted', '', $seq], $this->tombstoneTtl());
+            }
+        });
+    }
+
+    /**
+     * Run by ReloadKeyspace.
+     */
+    public function reloadFromQueue(): int
+    {
+        try {
+            return $this->load();
+        } finally {
+            $this->replica->forget($this->namespace.':reload-queued');
+        }
+    }
+
+    /**
+     * The replica's record for a key in the current generation: an entry, a tombstone [deleted, ts, seq], or null.
+     *
+     * @return Entry|array{0: string, 1: string, 2: int}|null
+     */
+    protected function raw(string $key, ?int $generation = null): Entry|array|null
+    {
+        $data = $this->replica->get($this->entryKey($key, $generation));
+
+        if (is_array($data) && count($data) === 3 && ($data[0] ?? null) === 'deleted') {
+            return ['deleted', (string) $data[1], (int) $data[2]];
+        }
+
+        return Entry::tryFrom($data);
+    }
+
+    protected function nextSeq(): int
+    {
+        return (int) $this->replica->increment($this->namespace.':seq');
+    }
+
+    protected function flushedSeq(): int
+    {
+        return (int) $this->replica->get($this->namespace.':flushed-seq', 0);
+    }
+
+    protected function tombstoneTtl(): int
+    {
+        return max(3600, $this->entryTtl(null) ?? 86_400);
+    }
+
+    protected function queueJob(object $job): void
+    {
+        if ($this->dispatcher === null) {
+            throw new SlackCacheException('Write-behind and background sync need the queue. Is illuminate/queue installed?');
+        }
+
+        if (method_exists($job, 'onConnection') && method_exists($job, 'onQueue')) {
+            $job->onConnection($this->queueConnection)->onQueue($this->queue);
+        }
+
+        ($this->dispatcher)($job);
     }
 
     /**
@@ -160,7 +365,7 @@ class Keyspace
      */
     protected function deleteMessage(?Channel $channel, string $ts): void
     {
-        if ($channel === null) {
+        if ($channel === null || $ts === '') {
             return;
         }
 
@@ -192,6 +397,10 @@ class Keyspace
 
     public function remove(string $key): bool
     {
+        if ($this->async) {
+            return $this->removeLater($key);
+        }
+
         $entry = $this->get($key);
 
         if ($entry === null) {
@@ -203,7 +412,7 @@ class Keyspace
 
         foreach ($this->liveGenerations() as $generation) {
             // A tombstone, so a reload already in progress does not resurrect the key from its snapshot.
-            $this->replica->put($this->entryKey($key, $generation), 'deleted', $this->entryTtl(null) ?? 3600);
+            $this->replica->put($this->entryKey($key, $generation), ['deleted', '', 0], $this->tombstoneTtl());
         }
 
         return true;
@@ -268,7 +477,18 @@ class Keyspace
             $live++;
 
             // A write or delete during the reload is newer than the snapshot: keep it.
-            if (! $this->replica->has($this->entryKey($entry->key, $generation))) {
+            if ($this->replica->has($this->entryKey($entry->key, $generation))) {
+                continue;
+            }
+
+            // So is a queued write or delete that has not reached Slack yet.
+            $queued = $this->raw($entry->key, $previous);
+
+            if ($queued instanceof Entry && $queued->pending) {
+                $this->remember($generation, $queued);
+            } elseif (is_array($queued) && $queued[2] > 0) {
+                $this->replica->put($this->entryKey($entry->key, $generation), $queued, $this->tombstoneTtl());
+            } else {
                 $this->remember($generation, $entry);
             }
         }
@@ -320,6 +540,9 @@ class Keyspace
      */
     public function flush(): int
     {
+        // Queued writes from before the flush must not bring their keys back.
+        $this->replica->forever($this->namespace.':flushed-seq', (int) $this->replica->get($this->namespace.':seq', 0));
+
         $deleted = $this->deleteWhere(fn () => true);
 
         $this->exclusively('load', function () {
@@ -483,6 +706,15 @@ class Keyspace
             return;
         }
 
+        // Stale, not cold: keep serving the replica and let a queued job re-read the channel.
+        if ($this->backgroundSync && $this->replica->has($this->namespace.':generation')) {
+            if ($this->replica->add($this->namespace.':reload-queued', true, max(60, (int) $this->syncInterval))) {
+                $this->queueJob(new Jobs\ReloadKeyspace($this->storeName));
+            }
+
+            return;
+        }
+
         // One process reloads; the others wait for it, then find the replica fresh.
         $this->exclusively('load', function () {
             if (! $this->replica->has($this->namespace.':synced')) {
@@ -556,7 +788,8 @@ class Keyspace
             return $seconds;
         }
 
-        $cap = 2 * $this->syncInterval + 60;
+        // With background re-syncs the next reload can be late, by as long as the queue is slow.
+        $cap = max(2 * $this->syncInterval + 60, $this->backgroundSync ? 3600 : 0);
 
         return $seconds === null ? $cap : min($seconds, $cap);
     }
