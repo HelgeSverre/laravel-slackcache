@@ -8,6 +8,8 @@ use Illuminate\Cache\TaggedCache;
 use Illuminate\Cache\TagSet;
 use Illuminate\Contracts\Cache\CanFlushLocks;
 use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Encryption\DecryptException;
+use Illuminate\Contracts\Encryption\StringEncrypter as Encrypter;
 use Illuminate\Support\Carbon;
 use RuntimeException;
 
@@ -25,6 +27,12 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
      */
     protected array $tags = [];
 
+    /** Marks a value compressed with zlib (raw DEFLATE). */
+    public const string COMPRESSED = 'SC1Z:';
+
+    /** Marks a value encrypted with Laravel's encrypter. */
+    public const string ENCRYPTED = 'SC1E:';
+
     /**
      * @param  array<int, class-string>|bool|null  $serializableClasses
      */
@@ -33,6 +41,8 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
         protected string $prefix = '',
         protected array|bool|null $serializableClasses = null,
         protected ?SlackStore $lockStore = null,
+        protected ?Encrypter $encrypter = null,
+        protected bool $compress = false,
     ) {
         $keyspace->previewUsing(fn (string $value) => $this->preview($this->unserialize($value)));
     }
@@ -103,14 +113,16 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
         return $this->keyspace->atomically($key, function () use ($key, $value) {
             $current = $this->keyspace->get($key);
 
-            if ($current !== null && ! preg_match('/^-?(0|[1-9][0-9]*)$/', $current->value)) {
+            $plain = $current === null ? '0' : $this->decode($current->value);
+
+            if ($plain === null || ! preg_match('/^-?(0|[1-9][0-9]*)$/', $plain)) {
                 return false;
             }
 
-            $number = ($current === null ? 0 : (int) $current->value) + (int) $value;
+            $number = (int) $plain + (int) $value;
 
             // Like Redis INCR, keep the key's TTL.
-            $this->keyspace->write($key, (string) $number, $current?->expireAt, null, $this->tags);
+            $this->keyspace->write($key, $this->encode((string) $number), $current?->expireAt, $this->preview($number), $this->tags);
 
             return $number;
         });
@@ -225,6 +237,10 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
      */
     protected function preview(mixed $value): string
     {
+        if ($this->encrypter !== null) {
+            return '(encrypted)';
+        }
+
         if (is_string($value) || is_int($value) || is_float($value)) {
             return (string) $value;
         }
@@ -244,18 +260,70 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
         return is_object($value) ? $value::class.' (serialized)' : get_debug_type($value);
     }
 
+    /**
+     * Serialize a value into the bytes stored in Slack: compressed and encrypted when configured.
+     */
     protected function serialize(mixed $value): string
     {
         // Numbers are stored as plain text, like the Redis store, so INCR-style counters stay readable in Slack.
         if (is_int($value) || (is_numeric($value) && is_finite((float) $value))) {
-            return (string) $value;
+            return $this->encode((string) $value);
         }
 
-        return serialize($value);
+        return $this->encode(serialize($value));
+    }
+
+    /**
+     * Compress, then encrypt. Compression is kept only when it makes the value smaller.
+     */
+    protected function encode(string $plain): string
+    {
+        if ($this->compress) {
+            $compressed = gzdeflate($plain, 6);
+
+            if ($compressed !== false && strlen($compressed) + strlen(self::COMPRESSED) < strlen($plain)) {
+                $plain = self::COMPRESSED.$compressed;
+            }
+        }
+
+        return $this->encrypter === null ? $plain : self::ENCRYPTED.$this->encrypter->encryptString($plain);
+    }
+
+    /**
+     * Undo encode(). Markers are honoured whatever the current settings, so turning an option off never strands values.
+     * Returns null for a value that cannot be decrypted or inflated (a rotated key, say): a cache miss.
+     */
+    protected function decode(string $stored): ?string
+    {
+        if (str_starts_with($stored, self::ENCRYPTED)) {
+            if ($this->encrypter === null) {
+                return null;
+            }
+
+            try {
+                $stored = $this->encrypter->decryptString(substr($stored, strlen(self::ENCRYPTED)));
+            } catch (DecryptException) {
+                return null;
+            }
+        }
+
+        if (str_starts_with($stored, self::COMPRESSED)) {
+            $inflated = @gzinflate(substr($stored, strlen(self::COMPRESSED)));
+
+            return $inflated === false ? null : $inflated;
+        }
+
+        return $stored;
     }
 
     protected function unserialize(string $value): mixed
     {
+        $value = $this->decode($value);
+
+        if ($value === null) {
+            return null;
+        }
+
         if (is_numeric($value)) {
             return $value;
         }

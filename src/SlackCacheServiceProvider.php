@@ -14,6 +14,7 @@ use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\CacheManager;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
+use Illuminate\Contracts\Encryption\StringEncrypter;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Foundation\Console\AboutCommand;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -133,7 +134,25 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             $prefix,
             $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
             $lockChannel === null ? null : new SlackStore(self::keyspace($api, $replica, [$lockChannel], $config), $prefix),
+            ($config['encrypt'] ?? false) ? $app->make(StringEncrypter::class) : null,
+            self::compression($config),
         );
+    }
+
+    /**
+     * @param  array<string, mixed>  $config
+     */
+    protected static function compression(array $config): bool
+    {
+        if (! ($config['compress'] ?? false)) {
+            return false;
+        }
+
+        if (! function_exists('gzdeflate')) {
+            throw new SlackCacheException('The slack cache store\'s compress option needs the zlib extension.');
+        }
+
+        return true;
     }
 
     /**
