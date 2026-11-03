@@ -431,6 +431,16 @@ class Keyspace
         return $store->lock($this->namespace.':lock:'.sha1($key), 10)->block(10, $callback);
     }
 
+    public function api(): SlackApi
+    {
+        return $this->api;
+    }
+
+    public function replica(): Repository
+    {
+        return $this->replica;
+    }
+
     public function shardFor(string $key): int
     {
         return KeySlot::shard($key, count($this->channelNames));

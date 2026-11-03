@@ -2,6 +2,7 @@
 
 namespace HelgeSverre\SlackCache;
 
+use HelgeSverre\SlackCache\Commands\DoctorCommand;
 use HelgeSverre\SlackCache\Commands\InfoCommand;
 use HelgeSverre\SlackCache\Commands\KeysCommand;
 use HelgeSverre\SlackCache\Commands\LoadCommand;
@@ -31,6 +32,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
         $package
             ->name('slackcache')
             ->hasCommands([
+                DoctorCommand::class,
                 InfoCommand::class,
                 KeysCommand::class,
                 LoadCommand::class,

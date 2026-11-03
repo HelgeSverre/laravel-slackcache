@@ -488,7 +488,8 @@ class FakeSlack
      */
     protected function ok(array $data): PromiseInterface
     {
-        return Factory::response(['ok' => true] + $data, 200, $this->isBot ? ['x-oauth-scopes' => implode(',', $this->scopes)] : []);
+        // Like Slack: bot tokens report the app's scopes; browser session tokens report Slack's client scopes.
+        return Factory::response(['ok' => true] + $data, 200, ['x-oauth-scopes' => $this->isBot ? implode(',', $this->scopes) : 'identify,read,post,client']);
     }
 
     protected function error(string $error): PromiseInterface

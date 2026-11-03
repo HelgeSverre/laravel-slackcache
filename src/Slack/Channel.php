@@ -45,6 +45,15 @@ class Channel
     }
 
     /**
+     * Post a plain message and delete it again. Proves the token can write here.
+     */
+    public function probe(string $text): void
+    {
+        $ts = (string) $this->api->call('chat.postMessage', ['channel' => $this->id, 'text' => $text])['ts'];
+        $this->delete($ts);
+    }
+
+    /**
      * Replace a message's text and blocks in place. Fails if Slack stored anything other than what was sent.
      *
      * @param  list<array<string, mixed>>  $blocks

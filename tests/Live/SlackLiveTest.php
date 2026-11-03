@@ -143,3 +143,33 @@ it('keeps version history in threads on a real workspace', function () {
     $history = $api->call('conversations.history', ['channel' => $channel->id, 'limit' => 50])['messages'];
     expect(array_filter($history, fn (array $m) => ($m['subtype'] ?? null) === 'tombstone'))->toBeEmpty();
 })->group('live');
+
+it('encrypts and compresses on a real workspace', function () {
+    config()->set('app.key', 'base64:'.base64_encode(random_bytes(32)));
+    config()->set('cache.stores.slack.encrypt', true);
+    config()->set('cache.stores.slack.compress', true);
+    $cache = Cache::store('slack');
+    /** @var SlackStore $store */
+    $store = $cache->getStore();
+    $channel = $store->keyspace()->channels()[0];
+    $cache->flush();
+
+    $value = str_repeat('{"row": "a fairly repetitive payload"}, ', 800); // ~32 KB, over the uncompressed limit
+    $cache->put('smoke:big-secret', $value, 120);
+
+    [, $text] = iterator_to_array($channel->messages(), false)[0];
+    expect(Codec::decode($text)[1])->toStartWith('SC1E:')
+        ->and($text)->not->toContain('repetitive');
+
+    Cache::store('replica')->flush();
+    app('cache')->forgetDriver('slack');
+    expect(Cache::store('slack')->get('smoke:big-secret'))->toBe($value);
+
+    Cache::store('slack')->flush();
+})->group('live');
+
+it('passes slackcache:doctor on a real workspace', function () {
+    $this->artisan('slackcache:doctor')
+        ->expectsOutputToContain('All checks passed')
+        ->assertSuccessful();
+})->group('live');
