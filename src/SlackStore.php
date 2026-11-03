@@ -3,16 +3,27 @@
 namespace HelgeSverre\SlackCache;
 
 use Illuminate\Cache\RetrievesMultipleKeys;
+use Illuminate\Cache\TaggableStore;
+use Illuminate\Cache\TaggedCache;
+use Illuminate\Cache\TagSet;
+use Illuminate\Contracts\Cache\CanFlushLocks;
 use Illuminate\Contracts\Cache\LockProvider;
-use Illuminate\Contracts\Cache\Store;
 use Illuminate\Support\Carbon;
+use RuntimeException;
 
 /**
  * A Laravel cache store persisted to Slack. One message per key.
  */
-class SlackStore implements LockProvider, Store
+class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
 {
     use RetrievesMultipleKeys;
+
+    /**
+     * The tags of the tagged cache this instance writes for, shown in the Slack preview.
+     *
+     * @var list<string>
+     */
+    protected array $tags = [];
 
     /**
      * @param  array<int, class-string>|bool|null  $serializableClasses
@@ -21,7 +32,31 @@ class SlackStore implements LockProvider, Store
         protected Keyspace $keyspace,
         protected string $prefix = '',
         protected array|bool|null $serializableClasses = null,
+        protected ?SlackStore $lockStore = null,
     ) {}
+
+    /**
+     * Begin executing a new tags operation.
+     *
+     * @param  mixed  $names
+     */
+    public function tags($names): TaggedCache
+    {
+        $names = array_values(array_map('strval', is_array($names) ? $names : func_get_args()));
+
+        $writer = clone $this;
+        $writer->tags = $names;
+
+        return new SlackTaggedCache($writer, new TagSet($this, $names));
+    }
+
+    /**
+     * Laravel 4.0 called tags "sections". Laravel 4.1 renamed them. This store remembers.
+     */
+    public function section(string $name): TaggedCache
+    {
+        return $this->tags([$name]);
+    }
 
     public function get($key): mixed
     {
@@ -36,7 +71,7 @@ class SlackStore implements LockProvider, Store
             return $this->forget($key);
         }
 
-        $this->keyspace->write($this->prefix.$key, $this->serialize($value), $this->expiresAt($seconds), $this->preview($value));
+        $this->keyspace->write($this->prefix.$key, $this->serialize($value), $this->expiresAt($seconds), $this->preview($value), $this->tags);
 
         return true;
     }
@@ -53,7 +88,7 @@ class SlackStore implements LockProvider, Store
                 return false;
             }
 
-            $this->keyspace->write($key, $this->serialize($value), $seconds > 0 ? $this->expiresAt($seconds) : null, $this->preview($value));
+            $this->keyspace->write($key, $this->serialize($value), $seconds > 0 ? $this->expiresAt($seconds) : null, $this->preview($value), $this->tags);
 
             return true;
         });
@@ -73,7 +108,7 @@ class SlackStore implements LockProvider, Store
             $number = ($current === null ? 0 : (int) $current->value) + (int) $value;
 
             // Like Redis INCR, keep the key's TTL.
-            $this->keyspace->write($key, (string) $number, $current?->expireAt);
+            $this->keyspace->write($key, (string) $number, $current?->expireAt, null, $this->tags);
 
             return $number;
         });
@@ -86,7 +121,7 @@ class SlackStore implements LockProvider, Store
 
     public function forever($key, $value): bool
     {
-        $this->keyspace->write($this->prefix.$key, $this->serialize($value), null, $this->preview($value));
+        $this->keyspace->write($this->prefix.$key, $this->serialize($value), null, $this->preview($value), $this->tags);
 
         return true;
     }
@@ -102,7 +137,7 @@ class SlackStore implements LockProvider, Store
                 return false;
             }
 
-            $this->keyspace->write($key, $current->value, $this->expiresAt($seconds), $this->preview($this->unserialize($current->value)));
+            $this->keyspace->write($key, $current->value, $this->expiresAt($seconds), $this->preview($this->unserialize($current->value)), $this->tags);
 
             return true;
         });
@@ -135,7 +170,29 @@ class SlackStore implements LockProvider, Store
 
     public function lock($name, $seconds = 0, $owner = null): SlackLock
     {
-        return new SlackLock($this, $name, $seconds, $owner);
+        return new SlackLock($this->lockStore ?? $this, $name, $seconds, $owner);
+    }
+
+    /**
+     * Whether locks live in their own channel (`lock_channel`).
+     */
+    public function hasSeparateLockStore(): bool
+    {
+        return $this->lockStore !== null;
+    }
+
+    /**
+     * Delete every lock message in the lock channel. Only possible when locks have a channel of their own.
+     */
+    public function flushLocks(): bool
+    {
+        if ($this->lockStore === null) {
+            throw new RuntimeException('Flushing locks needs a separate lock channel. Set lock_channel on the slack cache store.');
+        }
+
+        $this->lockStore->keyspace()->flush();
+
+        return true;
     }
 
     public function restoreLock($name, $owner): SlackLock

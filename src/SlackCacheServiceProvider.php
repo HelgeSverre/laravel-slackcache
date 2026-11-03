@@ -121,9 +121,10 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             baseUrl: rtrim((string) ($config['base_url'] ?? SlackApi::BASE_URL), '/').'/',
         );
 
-        $keyspace = new Keyspace(
+        $replica = self::replica($app, $config, $cache);
+        $keyspace = /** @param list<string> $channels */ fn (array $channels) => new Keyspace(
             $api,
-            self::replica($app, $config, $cache),
+            $replica,
             $channels,
             syncInterval: array_key_exists('sync_interval', $config)
                 ? ($config['sync_interval'] === null ? null : (int) $config['sync_interval'])
@@ -133,10 +134,14 @@ class SlackCacheServiceProvider extends PackageServiceProvider
                 : 90,
         );
 
+        $prefix = (string) ($config['prefix'] ?? $app->make(ConfigRepository::class)->get('cache.prefix', ''));
+        $lockChannel = isset($config['lock_channel']) ? ltrim((string) $config['lock_channel'], '#') : null;
+
         return new SlackStore(
-            $keyspace,
-            (string) ($config['prefix'] ?? $app->make(ConfigRepository::class)->get('cache.prefix', '')),
+            $keyspace($channels),
+            $prefix,
             $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
+            $lockChannel === null ? null : new SlackStore($keyspace([$lockChannel]), $prefix),
         );
     }
 

@@ -22,11 +22,12 @@ final class Codec
     public const int PREVIEW = 1_500;
 
     /**
+     * @param  list<string>  $tags  Cache tags, shown in the preview.
      * @return array{0: string, 1: list<array<string, mixed>>}
      *
      * @throws ValueTooLargeException
      */
-    public static function encode(string $key, string $value, ?int $expireAt = null, ?string $preview = null): array
+    public static function encode(string $key, string $value, ?int $expireAt = null, ?string $preview = null, array $tags = []): array
     {
         $text = implode(' ', [
             self::MARKER,
@@ -42,7 +43,7 @@ final class Codec
         $header = [
             ['type' => 'text', 'text' => 'SET ', 'style' => ['bold' => true]],
             ['type' => 'text', 'text' => self::show($key, 200), 'style' => ['code' => true]],
-            ['type' => 'text', 'text' => self::expiryNote($expireAt)],
+            ['type' => 'text', 'text' => self::expiryNote($expireAt).($tags === [] ? '' : ' · tags: '.implode(', ', $tags))],
         ];
 
         $blocks = [[

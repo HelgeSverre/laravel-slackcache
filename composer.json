@@ -41,7 +41,10 @@
     "autoload": {
         "psr-4": {
             "HelgeSverre\\SlackCache\\": "src/"
-        }
+        },
+        "files": [
+            "polyfills/CanFlushLocks.php"
+        ]
     },
     "autoload-dev": {
         "psr-4": {

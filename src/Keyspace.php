@@ -55,11 +55,12 @@ class Keyspace
      * Post the key's new message, then delete its previous one. The channel holds one message per live key.
      *
      * @param  string|null  $preview  What people see in Slack. Defaults to the stored bytes.
+     * @param  list<string>  $tags  Cache tags, shown in the preview.
      */
-    public function write(string $key, string $value, ?int $expireAt, ?string $preview = null): Entry
+    public function write(string $key, string $value, ?int $expireAt, ?string $preview = null, array $tags = []): Entry
     {
         $old = $this->get($key);
-        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview);
+        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
 
         $shard = $this->shardFor($key);
         $ts = $this->channels()[$shard]->post($text, $blocks);
@@ -204,16 +205,7 @@ class Keyspace
      */
     public function flush(): int
     {
-        $deleted = 0;
-
-        foreach ($this->channels() as $channel) {
-            foreach (iterator_to_array($channel->messages(), false) as [$ts, $text]) {
-                if (Codec::decode($text) !== null) {
-                    $channel->delete($ts);
-                    $deleted++;
-                }
-            }
-        }
+        $deleted = $this->deleteWhere(fn () => true);
 
         $this->exclusively('load', function () {
             $previous = $this->generation();
@@ -221,6 +213,34 @@ class Keyspace
             $this->markSynced();
             $this->dropGeneration($previous);
         });
+
+        return $deleted;
+    }
+
+    /**
+     * Delete the messages of keys that match a predicate, scanning every channel, and forget them in the replica.
+     *
+     * @param  callable(string): bool  $matches
+     * @return int The number of messages deleted.
+     */
+    public function deleteWhere(callable $matches): int
+    {
+        $deleted = 0;
+
+        foreach ($this->channels() as $channel) {
+            foreach (iterator_to_array($channel->messages(), false) as [$ts, $text]) {
+                $record = Codec::decode($text);
+
+                if ($record !== null && $matches($record[0])) {
+                    $channel->delete($ts);
+                    $deleted++;
+
+                    foreach ($this->liveGenerations() as $generation) {
+                        $this->replica->forget($this->entryKey($record[0], $generation));
+                    }
+                }
+            }
+        }
 
         return $deleted;
     }
