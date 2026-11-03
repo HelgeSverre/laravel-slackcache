@@ -82,6 +82,7 @@ SLACKCACHE_TOKEN=xoxb-...
 | `sync_interval` | `30` | Seconds before the replica re-reads the channel to pick up other servers' writes. `null`: only when the replica is cold. |
 | `retention_days` | `90` | When Slack hides a message. Keys without a TTL expire then. On a paid plan, set it to `null`. |
 | `shards` | `1` | Spread keys over `channel-1` … `channel-N`. See [Sharding](#sharding). |
+| `lock_channel` | none | Keep locks in a channel of their own, e.g. `slackcache-locks`. See [Locks](#locks). |
 | `prefix` | `cache.prefix` | Key prefix, as for other stores. |
 | `timeout` | `60` | HTTP timeout in seconds. A throttled write can take several. |
 | `retries` | `5` | How many HTTP 429s to wait out, using Slack's `Retry-After`. |
@@ -135,6 +136,68 @@ Schedule::command('slackcache:reap --limit=20')->everyMinute();
 ```
 
 Each command takes `--store=` if your store is not called `slack`.
+
+## Cache tags
+
+The store supports [cache tags](https://laravel.com/docs/cache#cache-tags). Each tagged message lists its tags, so people can see what a key belongs to:
+
+```php
+Cache::store('slack')->tags(['people', 'artists'])->put('John', $john, 600);
+
+Cache::store('slack')->tags(['people', 'artists'])->get('John');
+```
+
+```
+SET `laravel-cache-5e8e…:John` · expires 2026-11-03 14:12:00 UTC · tags: people, artists
+```
+
+Flushing tags works as in Laravel: every key stored under any of the flushed tags becomes unreachable at once. The driver also deletes the messages of keys stored under exactly the flushed tags:
+
+```php
+Cache::store('slack')->tags(['people'])->flush();
+```
+
+Keys stored under a larger set of tags (`['people', 'artists']` above) become unreachable too, but their messages stay in the channel until they expire, are reaped, or the free plan evicts them. Laravel's Redis store has the same problem and a command for it. The free plan is ours.
+
+### Sections
+
+Laravel 4.0 called them cache sections. Laravel 4.1 renamed them to tags. This store still answers to the old name:
+
+```php
+Cache::store('slack')->section('people')->put('John', $john, 600);
+```
+
+`section('people')` is `tags(['people'])`. It is not on the `Cache` facade's default store, only on `Cache::store('slack')`.
+
+## Locks
+
+[Atomic locks](https://laravel.com/docs/cache#atomic-locks) are ordinary keys, so by default they live in the cache channel:
+
+```php
+Cache::store('slack')->lock('deploy', 120)->get(function () {
+    // One deploy at a time. The lock is a Slack message.
+});
+```
+
+Set `lock_channel` to give locks a channel of their own. The cache channel then holds only cache, and locks can be flushed without touching it:
+
+```php
+'slack' => [
+    'driver' => 'slack',
+    // ...
+    'lock_channel' => 'slackcache-locks',
+],
+```
+
+```php
+Cache::store('slack')->getStore()->flushLocks(); // Deletes every lock message, nothing else
+```
+
+```bash
+php artisan cache:clear slack --locks   # Laravel 13
+```
+
+Without `lock_channel`, `flushLocks()` throws, as Laravel's own stores do when locks share the cache.
 
 ## Works with the rest of Laravel
 

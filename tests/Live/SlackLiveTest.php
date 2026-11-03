@@ -80,3 +80,30 @@ it('round-trips the cache contract through a real Slack channel', function () {
     $cold->flush();
     expect(iterator_to_array($channel->messages(), false))->toBeEmpty();
 })->group('live');
+
+it('tags, flushes tags and keeps locks in their own channel on a real workspace', function () {
+    config()->set('cache.stores.slack.lock_channel', (getenv('SLACKCACHE_LIVE_CHANNEL') ?: 'slackcache-smoke').'-locks');
+    $cache = Cache::store('slack');
+    /** @var SlackStore $store */
+    $store = $cache->getStore();
+    $cache->flush();
+    $store->flushLocks();
+
+    $cache->tags(['smoke', 'people'])->put('john', 'doe', 120);
+    $cache->tags(['smoke'])->put('anne', 'smith', 120);
+    expect($cache->tags(['smoke', 'people'])->get('john'))->toBe('doe');
+
+    $cache->tags(['smoke'])->flush();
+    expect($cache->tags(['smoke'])->get('anne'))->toBeNull()
+        ->and($cache->tags(['smoke', 'people'])->get('john'))->toBeNull();
+
+    $lock = $cache->lock('smoke:deploy', 30);
+    expect($lock->get())->toBeTrue()
+        ->and($cache->lock('smoke:deploy', 30)->get())->toBeFalse()
+        ->and($store->flushLocks())->toBeTrue()
+        ->and($cache->lock('smoke:deploy', 30)->get())->toBeTrue();
+
+    $store->flushLocks();
+    $cache->flush();
+    expect(iterator_to_array($store->keyspace()->channels()[0]->messages(), false))->toBeEmpty();
+})->group('live');

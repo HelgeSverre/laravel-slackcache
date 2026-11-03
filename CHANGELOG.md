@@ -2,6 +2,15 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.3.0 - 2026-11-03
+
+### Added
+
+- Cache tags: `Cache::store('slack')->tags([...])`. Tags appear in each message's preview. Flushing tags deletes the messages of keys stored under exactly those tags.
+- `section($name)`, the Laravel 4.0 name for a single tag.
+- `lock_channel` option: locks in a channel of their own. `flushLocks()` and `hasSeparateLockStore()` (Laravel 13's `CanFlushLocks`, polyfilled on Laravel 12), so `php artisan cache:clear --locks` works on Laravel 13.
+- Live smoke test for tags and the lock channel.
+
 ## v0.2.0 - 2026-11-03
 
 ### Added
