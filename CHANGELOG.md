@@ -2,6 +2,18 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.8.0 - 2026-11-03
+
+### Added
+
+- `reactions` option and `slackcache:decorate`: reactions for hot (`:fire:`), expiring (`:hourglass:`) and expired (`:skull:`) keys, kept in sync with each key's state within a `--limit` call budget. Read counts live in the replica, per message, for a day. Only the driver's own reactions are touched.
+- `reactions:write` in the app manifest; `slackcache:doctor` checks it when `reactions` is on.
+- `FakeSlack` supports `reactions.add`, `reactions.remove` and `reactAs()`.
+
+### Fixed
+
+- `slackcache:doctor` reset its failure count between runs in the same process.
+
 ## v0.7.0 - 2026-11-03
 
 ### Added

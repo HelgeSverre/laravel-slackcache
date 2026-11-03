@@ -48,7 +48,7 @@ Requires PHP 8.3+ and Laravel 12.40+ or 13.
 2. Open [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a manifest**, pick your workspace and paste the manifest.
 3. **Install to Workspace**, then copy the **Bot User OAuth Token** (`xoxb-…`).
 
-The manifest asks for `chat:write`, `channels:read`, `channels:history`, `channels:join` and `channels:manage`. The last one creates the cache channel if it does not exist. Slack does not add you to channels a bot creates, so look for `#slackcache` under **Browse channels**. It is worth a look.
+The manifest asks for `chat:write`, `channels:read`, `channels:history`, `channels:join` and `channels:manage`. `channels:manage` creates the cache channel if it does not exist. It also asks for `reactions:write`, which only the [reactions](#reactions) option uses. Slack does not add you to channels a bot creates, so look for `#slackcache` under **Browse channels**. It is worth a look.
 
 ## Configuration
 
@@ -91,6 +91,7 @@ SLACKCACHE_TOKEN=xoxb-...
 | `async` | `false` | Write the replica at once and Slack from a queued job. See [Write-behind](#write-behind). |
 | `queue_connection` / `queue` | default | Where the `sync` and `async` jobs run. |
 | `emoji` | `false` | Start each message's preview with status emoji. See [Status emoji](#status-emoji). |
+| `reactions` | `false` | `true`, or `['hot' => 100, 'expiring' => 3600]`: let `slackcache:decorate` react to hot, expiring and expired keys. See [Reactions](#reactions). |
 | `encrypt` | `false` | Encrypt values with your `APP_KEY`. See [Encryption](#encryption). |
 | `compress` | `false` | Compress values before storing them. See [Compression](#compression). |
 | `headers` / `base_url` | none / `https://slack.com/api/` | For proxies and other unusual networks. |
@@ -129,6 +130,7 @@ Numbers are stored as plain text, like Laravel's Redis store. Everything else is
 ## Artisan commands
 
 ```bash
+php artisan slackcache:decorate   # React to hot, expiring and expired keys (with the reactions option)
 php artisan slackcache:doctor     # Check the token, scopes, channels and settings
 php artisan slackcache:load       # Rebuild the replica from the channel history
 php artisan slackcache:reap       # Delete the messages of expired keys (20 per run, like Redis)
@@ -346,6 +348,43 @@ Set `'emoji' => true` and each message's preview starts with emoji saying what k
 
 The emoji are part of the message's blocks, so they cost no extra API calls. The message text, which holds the value, is unchanged.
 
+## Reactions
+
+Some states only exist after a key is written: it is read a lot, it is about to expire, it has expired and waits for the reaper. With `reactions` on, `slackcache:decorate` marks them with reactions:
+
+```php
+'slack' => [
+    'driver' => 'slack',
+    // ...
+    'reactions' => [
+        'hot' => 100,       // 🔥 after this many reads of the current value
+        'expiring' => 3600, // ⌛ when the TTL ends within this many seconds
+    ],
+],
+```
+
+```php
+// routes/console.php
+Schedule::command('slackcache:decorate --limit=20')->everyFiveMinutes();
+```
+
+| Reaction | Slack name | Meaning |
+| --- | --- | --- |
+| 🔥 | `:fire:` | Read at least `hot` times. Counts are kept per message for a day, so a rewritten key starts cold. |
+| ⌛ | `:hourglass:` | Expires within `expiring` seconds |
+| 💀 | `:skull:` | Expired, waiting for `slackcache:reap` |
+
+Notes:
+
+- `'reactions' => true` uses the defaults shown above.
+- Reads are counted in the replica, never in Slack, and only when `reactions` is on: one replica increment per hit.
+- Each run compares the reactions each key should have with the ones the driver already added, and only adds or removes the difference. A run with nothing new makes no reaction calls.
+- `--limit` caps reaction calls per run (default 20). Slack allows about 50 per minute.
+- Reactions people add are theirs: the command only touches its own, and only these three.
+- Without `history`, a rewrite is a new message, so its reactions start over. With `history`, the message is edited in place, and the next run takes off reactions that no longer apply.
+- The lock channel is decorated too.
+- Needs the `reactions:write` scope, which the manifest includes. `slackcache:doctor` checks for it when `reactions` is on.
+
 ## Version history
 
 Set `'history' => true` and overwriting a key edits its message in place instead of replacing it. The previous value goes into the message's thread:
@@ -543,6 +582,7 @@ $slack->rateLimit(times: 2, retryAfter: 3); // The next two calls get HTTP 429
 $slack->fail('channel_not_found');          // The next call fails
 $slack->serverError(times: 2, status: 503); // The next two calls get HTTP 503
 $slack->disconnect();                       // The next call drops the connection
+$slack->reactAs('U0HUMAN', 'slackcache', $ts, 'eyes'); // Someone else reacts
 $slack->replies('slackcache', $ts);         // A message's thread, with `history` on
 $slack->beforeNext('conversations.history', fn () => /* interleave another process */ null);
 ```

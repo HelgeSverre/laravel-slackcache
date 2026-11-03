@@ -241,3 +241,68 @@ it('shows status emoji in previews on a real workspace', function () {
 
     $cache->flush();
 })->group('live');
+
+it('decorates with reactions on a real workspace', function () {
+    config()->set('cache.stores.slack.reactions', ['hot' => 2, 'expiring' => 3600]);
+    config()->set('cache.stores.slack.history', true);
+    config()->set('cache.stores.slack.emoji', true);
+    $cache = Cache::store('slack');
+    /** @var SlackStore $store */
+    $store = $cache->getStore();
+    $keyspace = $store->keyspace();
+    $channel = $keyspace->channels()[0];
+    $api = $keyspace->api();
+    $me = $api->call('auth.test')['user_id'];
+    $cache->flush();
+
+    $reactions = function () use ($api, $channel, $me) {
+        $result = [];
+
+        foreach ($api->call('conversations.history', ['channel' => $channel->id, 'limit' => 50])['messages'] as $message) {
+            $key = Codec::decode($message['text'] ?? '')[0] ?? null;
+
+            if ($key !== null) {
+                $names = array_column(array_filter($message['reactions'] ?? [], fn ($r) => in_array($me, $r['users'], true)), 'name');
+                sort($names);
+                $result[$key] = $names;
+            }
+        }
+
+        ksort($result);
+
+        return $result;
+    };
+
+    $cache->put('smoke:soon', 'v', 600);
+    $cache->put('smoke:later', 'v', 86_400);
+    $cache->put('smoke:gone', 'v', 2);
+    $cache->forever('smoke:hot', 'v');
+    $cache->get('smoke:hot');
+    $cache->get('smoke:hot');
+    $this->travel(5)->seconds();
+
+    $this->artisan('slackcache:decorate')->expectsOutputToContain('Added 3 reactions, removed 0.')->assertSuccessful();
+
+    expect($reactions())->toBe([
+        'smoke:gone' => ['skull'],
+        'smoke:hot' => ['fire'],
+        'smoke:later' => [],
+        'smoke:soon' => ['hourglass'],
+    ]);
+
+    // Nothing changed, so nothing to do.
+    $this->artisan('slackcache:decorate')->expectsOutputToContain('Added 0 reactions, removed 0.')->assertSuccessful();
+
+    // With history on, an overwrite edits the message in place and keeps its reactions; decorate takes off the stale one.
+    $cache->forever('smoke:soon', 'v2');
+    $this->artisan('slackcache:decorate')->expectsOutputToContain('Added 0 reactions, removed 1.')->assertSuccessful();
+    expect($reactions()['smoke:soon'])->toBe([]);
+
+    // The reaper deletes what the skull marked.
+    $this->artisan('slackcache:reap')->assertSuccessful();
+    expect($reactions())->not->toHaveKey('smoke:gone');
+
+    $cache->flush();
+    $left = $api->call('conversations.history', ['channel' => $channel->id, 'limit' => 50])['messages'];
+    expect(array_filter($left, fn ($m) => ($m['subtype'] ?? null) === 'tombstone' || Codec::decode($m['text'] ?? '') !== null))->toBeEmpty();
+})->group('live');
