@@ -328,7 +328,13 @@ A lock that is never released (a crashed worker, say) expires, but its message s
 
 ## Status emoji
 
-Set `'emoji' => true` and each message's preview starts with emoji saying what kind of key it is:
+Set `'emoji' => true` and each message's preview starts with emoji saying what kind of key it is. With [reactions](#reactions) on as well, a real channel looks like this:
+
+<p align="center">
+  <img src="art/emoji-and-reactions.png" width="100%" alt="A Slack channel of cache messages. Each SET line starts with status emoji: an hourglass for keys with a TTL, an infinity sign for keys without one, a label and a clamp for a tagged, compressed value, a locked padlock for an encrypted value, a padlock for a lock. Below some messages are reactions: an hourglass on keys about to expire, fire on a frequently read key, and a skull on an expired session.">
+</p>
+
+In text:
 
 ```
 ⏳ SET `laravel-cache-report` · expires 2026-11-03 15:00:00 UTC
@@ -373,6 +379,8 @@ Schedule::command('slackcache:decorate --limit=20')->everyFiveMinutes();
 | 🔥 | `:fire:` | Read at least `hot` times. Counts are kept per message for a day, so a rewritten key starts cold. |
 | ⌛ | `:hourglass:` | Expires within `expiring` seconds |
 | 💀 | `:skull:` | Expired, waiting for `slackcache:reap` |
+
+The screenshot under [Status emoji](#status-emoji) shows all three on a real channel.
 
 Notes:
 
