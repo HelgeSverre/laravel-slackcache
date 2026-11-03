@@ -14,7 +14,10 @@ use Illuminate\Cache\CacheManager;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Foundation\Console\AboutCommand;
 use Illuminate\Http\Client\Factory as HttpFactory;
+use Illuminate\Session\CacheBasedSessionHandler;
+use Illuminate\Session\SessionManager;
 use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
 
@@ -34,6 +37,22 @@ class SlackCacheServiceProvider extends PackageServiceProvider
 
     public function packageBooted(): void
     {
+        $this->callAfterResolving('session', function (SessionManager $session) {
+            $session->extend('slack', function (Application $app) {
+                $config = $app->make(ConfigRepository::class);
+                $store = $config->get('session.store') ?: 'slack';
+
+                return new CacheBasedSessionHandler(
+                    clone $app->make(CacheManager::class)->store($store),
+                    (int) $config->get('session.lifetime', 120),
+                );
+            });
+        });
+
+        if (class_exists(AboutCommand::class)) {
+            AboutCommand::add('SlackCache', fn () => self::about($this->app->make(ConfigRepository::class)));
+        }
+
         $this->app->make(CacheManager::class)->extend('slack', function (Application $app, array $config) {
             /** @var CacheManager $this */
             return $this->repository(
@@ -41,6 +60,35 @@ class SlackCacheServiceProvider extends PackageServiceProvider
                 $config,
             );
         });
+    }
+
+    /**
+     * One line per store that uses the slack driver, from config alone. Slack is not called.
+     *
+     * @return array<string, string>
+     */
+    public static function about(ConfigRepository $config): array
+    {
+        $rows = [];
+
+        foreach ((array) $config->get('cache.stores', []) as $name => $store) {
+            if (! is_array($store) || ($store['driver'] ?? null) !== 'slack') {
+                continue;
+            }
+
+            $shards = max(1, (int) ($store['shards'] ?? 1));
+            $channel = '#'.ltrim((string) ($store['channel'] ?? 'slackcache'), '#');
+            $retention = array_key_exists('retention_days', $store) ? $store['retention_days'] : 90;
+
+            $rows[(string) $name] = implode(' · ', array_filter([
+                $shards === 1 ? $channel : "{$channel}-1 … {$channel}-{$shards}",
+                'replica: '.($store['replica'] ?? 'per-process'),
+                $retention === null ? 'noeviction' : 'allkeys-slack',
+                $config->get('cache.default') === $name ? 'default' : null,
+            ]));
+        }
+
+        return $rows === [] ? ['Stores' => 'none'] : $rows;
     }
 
     /**
