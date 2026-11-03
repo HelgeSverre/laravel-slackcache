@@ -332,7 +332,7 @@ Set `'emoji' => true` and each message's preview starts with emoji saying what k
 ⏳ SET `laravel-cache-report` · expires 2026-11-03 15:00:00 UTC
 ♾️ SET `laravel-cache-settings` · no TTL (the free plan evicts it in 90 days)
 🔒 SET `laravel-cache-deploy` · expires 2026-11-03 14:01:00 UTC
-♾️🏷️🔐🗜️ SET `laravel-cache-1e7c…:summary` · no TTL (the free plan evicts it in 90 days) · tags: reports
+♾️🏷️🔐🗜️ SET `laravel-cache-11f6ad8ec52a2984abaafd7c3b516503785c2072:summary` · no TTL (the free plan evicts it in 90 days) · tags: reports
 ```
 
 | Emoji | Slack name | Meaning |
