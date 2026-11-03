@@ -90,6 +90,7 @@ SLACKCACHE_TOKEN=xoxb-...
 | `sync` | `inline` | `background`: re-sync a stale replica from a queued job while reads carry on. See [Background sync](#background-sync). |
 | `async` | `false` | Write the replica at once and Slack from a queued job. See [Write-behind](#write-behind). |
 | `queue_connection` / `queue` | default | Where the `sync` and `async` jobs run. |
+| `emoji` | `false` | Start each message's preview with status emoji. See [Status emoji](#status-emoji). |
 | `encrypt` | `false` | Encrypt values with your `APP_KEY`. See [Encryption](#encryption). |
 | `compress` | `false` | Compress values before storing them. See [Compression](#compression). |
 | `headers` / `base_url` | none / `https://slack.com/api/` | For proxies and other unusual networks. |
@@ -322,6 +323,28 @@ php artisan cache:clear slack --locks   # Laravel 13
 Without `lock_channel`, `flushLocks()` throws, as Laravel's own stores do when locks share the cache.
 
 A lock that is never released (a crashed worker, say) expires, but its message stays. `slackcache:reap` reaps the lock channel too, after the cache channel, within the same `--limit`.
+
+## Status emoji
+
+Set `'emoji' => true` and each message's preview starts with emoji saying what kind of key it is:
+
+```
+⏳ SET `laravel-cache-report` · expires 2026-11-03 15:00:00 UTC
+♾️ SET `laravel-cache-settings` · no TTL (the free plan evicts it in 90 days)
+🔒 SET `laravel-cache-deploy` · expires 2026-11-03 14:01:00 UTC
+♾️🏷️🔐🗜️ SET `laravel-cache-1e7c…:summary` · no TTL (the free plan evicts it in 90 days) · tags: reports
+```
+
+| Emoji | Slack name | Meaning |
+| --- | --- | --- |
+| ⏳ | `:hourglass_flowing_sand:` | Has a TTL |
+| ♾️ | `:infinity:` | No TTL |
+| 🔒 | `:lock:` | A lock |
+| 🏷️ | `:label:` | Tagged |
+| 🔐 | `:closed_lock_with_key:` | Encrypted |
+| 🗜️ | `:compression:` | Compressed |
+
+The emoji are part of the message's blocks, so they cost no extra API calls. The message text, which holds the value, is unchanged.
 
 ## Version history
 

@@ -2,6 +2,12 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.7.0 - 2026-11-03
+
+### Added
+
+- `emoji` option: each message's preview starts with Slack emoji for the kind of key: `:hourglass_flowing_sand:` (TTL), `:infinity:` (no TTL), `:lock:` (lock), `:label:` (tagged), `:closed_lock_with_key:` (encrypted), `:compression:` (compressed). No extra API calls; the message text is unchanged.
+
 ## v0.6.0 - 2026-11-03
 
 ### Added
