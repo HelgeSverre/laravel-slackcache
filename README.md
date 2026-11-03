@@ -35,7 +35,7 @@ The driver implements Laravel's full cache contract: `get`, `put`, `many`, `putM
 composer require helgesverre/laravel-slackcache
 ```
 
-Requires PHP 8.3+ and Laravel 12 or 13.
+Requires PHP 8.3+ and Laravel 12.40+ or 13.
 
 ## Create the Slack app
 
