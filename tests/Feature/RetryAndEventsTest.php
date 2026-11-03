@@ -2,10 +2,13 @@
 
 use HelgeSverre\SlackCache\Events\HistoryReplyFailed;
 use HelgeSverre\SlackCache\Events\KeyspaceReloaded;
+use HelgeSverre\SlackCache\Events\SlackApiCalled;
 use HelgeSverre\SlackCache\Events\SlackRateLimited;
 use HelgeSverre\SlackCache\Events\SlackRequestRetrying;
 use HelgeSverre\SlackCache\Exceptions\SlackApiException;
+use HelgeSverre\SlackCache\Slack\SlackApi;
 use HelgeSverre\SlackCache\Testing\FakeSlack;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Sleep;
@@ -90,4 +93,71 @@ it('dispatches an event when a history reply fails', function () {
     Cache::store('slack')->put('k', 'two', 600);
 
     Event::assertDispatched(HistoryReplyFailed::class, fn (HistoryReplyFailed $e) => $e->key === 'k' && $e->exception->getMessage() === 'Slack API call chat.postMessage failed: internal_error');
+});
+
+it('makes exactly retries + 1 attempts, for every kind of failure', function (Closure $fail, string $error) {
+    config()->set('cache.stores.slack.retries', 2);
+    $cache = Cache::store('slack');
+    $cache->put('warm', 1, 600);
+    $before = $this->slack->callCount('chat.postMessage');
+
+    // Two failures: the third attempt succeeds.
+    $fail($this->slack, 2);
+    $cache->put('k', 'v', 600);
+    expect($this->slack->callCount('chat.postMessage') - $before)->toBe(3);
+
+    // Three failures: the third attempt is the last.
+    $fail($this->slack, 5);
+    expect(fn () => $cache->put('k', 'v2', 600))->toThrow(SlackApiException::class, $error);
+    expect($this->slack->callCount('chat.postMessage') - $before)->toBe(6);
+})->with([
+    'server error' => [fn (FakeSlack $slack, int $n) => $slack->serverError($n), 'http_500'],
+    'rate limit' => [fn (FakeSlack $slack, int $n) => $slack->rateLimit($n), 'http_429'],
+    'dropped connection' => [fn (FakeSlack $slack, int $n) => $slack->disconnect($n), 'connection_failed'],
+]);
+
+it('makes exactly retries + 1 attempts at a file upload', function () {
+    config()->set('cache.stores.slack.retries', 2);
+    config()->set('cache.stores.slack.files', true);
+    $cache = Cache::store('slack');
+    $cache->put('warm', 1, 600);
+
+    $this->slack->fileOutage(2, 503);
+    $cache->put('big', random_bytes(20_000), 600);
+    expect($this->slack->callCount('files.slack.com/upload/v1/'.array_key_first($this->slack->files)))->toBe(3);
+
+    $this->slack->fileOutage(5, 503);
+    expect(fn () => $cache->put('big2', random_bytes(20_000), 600))->toThrow(SlackApiException::class, 'files.upload failed: http_503');
+});
+
+it('reports how long each call took', function () {
+    $events = [];
+    Event::listen(SlackApiCalled::class, function ($event) use (&$events) {
+        $events[] = $event;
+    });
+
+    Cache::store('slack')->put('k', 'v', 600);
+
+    expect($events)->not->toBeEmpty();
+    foreach ($events as $event) {
+        expect($event->milliseconds)->toBeGreaterThanOrEqual(0)->toBeLessThan(5_000);
+    }
+});
+
+it('tells token types apart by prefix', function (string $token, string $type) {
+    expect((new SlackApi(app(Factory::class), $token))->tokenType())->toBe($type);
+})->with([
+    ['xoxb-1', 'bot'],
+    ['xoxp-1', 'user'],
+    ['xoxc-1', 'browser session'],
+    ['xoxe.xoxp-1', 'configuration'],
+    ['nope-xoxb-', 'unknown'],
+]);
+
+it('reads the scopes Slack reports, trimmed', function () {
+    $this->slack->scopes = ['chat:write', ' channels:read', 'channels:history '];
+    $api = Cache::store('slack')->getStore()->keyspace()->api();
+    $api->call('auth.test');
+
+    expect($api->scopes())->toBe(['chat:write', 'channels:read', 'channels:history']);
 });

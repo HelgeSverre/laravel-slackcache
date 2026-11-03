@@ -1,0 +1,58 @@
+name: mutation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**.php'
+      - 'tests/**.php'
+      - 'composer.lock'
+      - '.github/workflows/mutation.yml'
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: keyspace
+            classes: 'HelgeSverre\SlackCache\Keyspace'
+            min: 63
+          - shard: store-and-api
+            classes: 'HelgeSverre\SlackCache\SlackStore,HelgeSverre\SlackCache\SlackTaggedCache,HelgeSverre\SlackCache\SlackLock,HelgeSverre\SlackCache\Slack\SlackApi,HelgeSverre\SlackCache\Slack\Channel,HelgeSverre\SlackCache\Slack\ChannelResolver,HelgeSverre\SlackCache\Slack\Owner'
+            min: 68
+          - shard: commands-jobs-integrations
+            classes: 'HelgeSverre\SlackCache\Commands,HelgeSverre\SlackCache\Jobs,HelgeSverre\SlackCache\Health,HelgeSverre\SlackCache\Pulse'
+            min: 65
+          - shard: codec-and-wiring
+            classes: 'HelgeSverre\SlackCache\Codec,HelgeSverre\SlackCache\Entry,HelgeSverre\SlackCache\KeySlot,HelgeSverre\SlackCache\SlackCache,HelgeSverre\SlackCache\SlackCacheServiceProvider,HelgeSverre\SlackCache\Exceptions,HelgeSverre\SlackCache\Events'
+            min: 75
+
+    name: mutate (${{ matrix.shard }})
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, intl, fileinfo
+          coverage: pcov
+
+      # From composer.lock, like PHPStan and Pint.
+      - name: Install composer dependencies
+        uses: ramsey/composer-install@v4
+
+      - name: Mutation testing
+        run: vendor/bin/pest --mutate --covered-only --class='${{ matrix.classes }}' --min=${{ matrix.min }}

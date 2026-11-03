@@ -68,7 +68,7 @@
         "format": "vendor/bin/pint",
         "lint": "vendor/bin/pint --test",
         "test:live": "vendor/bin/pest tests/Live --group=live",
-        "mutate": "XDEBUG_MODE=coverage vendor/bin/pest --mutate --everything --covered-only"
+        "mutate": "XDEBUG_MODE=coverage vendor/bin/pest --mutate --covered-only --class=HelgeSverre\\\\SlackCache --ignore=HelgeSverre\\\\SlackCache\\\\Testing"
     },
     "config": {
         "sort-packages": true,
