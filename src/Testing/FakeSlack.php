@@ -44,13 +44,16 @@ class FakeSlack
     protected array $outages = [];
 
     /** @var list<string> */
-    public array $scopes = ['chat:write', 'channels:read', 'channels:history', 'channels:join', 'channels:manage'];
+    public array $scopes = ['chat:write', 'channels:read', 'channels:history', 'channels:join', 'channels:manage', 'files:read', 'files:write'];
 
     /** @var array<string, list<callable(array<string, mixed>): void>> */
     protected array $hooks = [];
 
     /** @var list<string> */
     protected array $private = [];
+
+    /** @var array<string, array{name: string, title: string, bytes: string|null, length: int, complete: bool}> Uploaded files by ID. */
+    public array $files = [];
 
     /** The cache store the assertions read keys and values through: its prefix, serializer and encrypter. */
     protected ?string $store = null;
@@ -85,7 +88,10 @@ class FakeSlack
         $holder = new \stdClass;
         $holder->fake = $fake;
         self::$installed[$http] = $holder;
-        $http->fake(['slack.com/api/*' => fn (Request $request) => $holder->fake->handle($request)]);
+        $http->fake([
+            'slack.com/api/*' => fn (Request $request) => $holder->fake->handle($request),
+            'files.slack.com/*' => fn (Request $request) => $holder->fake->handleFile($request),
+        ]);
 
         return $fake;
     }
@@ -124,7 +130,7 @@ class FakeSlack
                 $key = substr($record[0], strlen($prefix));
 
                 if (! isset($found[$key]) || Entry::compareTs((string) $ts, $found[$key][0]) > 0) {
-                    $found[$key] = [(string) $ts, $record[1]];
+                    $found[$key] = [(string) $ts, $record[3] === null ? $record[1] : (string) ($this->files[$record[3][0]]['bytes'] ?? '')];
                 }
             }
         }
@@ -379,6 +385,10 @@ class FakeSlack
             'conversations.history' => $this->history($params),
             'conversations.replies' => $this->conversationReplies($params),
             'conversations.info' => $this->info($params),
+            'files.getUploadURLExternal' => $this->uploadUrl($params),
+            'files.completeUploadExternal' => $this->completeUpload($params),
+            'files.info' => $this->fileInfo($params),
+            'files.delete' => $this->deleteFile($params),
             'conversations.setTopic' => $this->setTopic($params),
             default => $this->error('unknown_method'),
         };
@@ -615,6 +625,146 @@ class FakeSlack
         }
 
         return $this->ok([]);
+    }
+
+    /**
+     * Answer the upload and download URLs on files.slack.com.
+     */
+    public function handleFile(Request $request): PromiseInterface
+    {
+        $path = (string) parse_url($request->url(), PHP_URL_PATH);
+        $this->calls[] = ['method' => 'files.slack.com'.$path, 'params' => []];
+
+        if ($this->fileOutages !== []) {
+            $outage = array_shift($this->fileOutages);
+
+            return $outage === 'disconnect'
+                ? Factory::failedConnection('cURL error 7: Failed to connect to files.slack.com')($request)
+                : Factory::response('', (int) $outage);
+        }
+
+        if (preg_match('#^/upload/v1/(F[A-Z0-9]+)$#', $path, $match) && $request->method() === 'POST') {
+            if (! isset($this->files[$match[1]]) || $this->files[$match[1]]['complete']) {
+                return Factory::response('', 404);
+            }
+
+            $this->files[$match[1]]['bytes'] = $request->body();
+
+            return Factory::response('OK - '.strlen($request->body()), 200);
+        }
+
+        if (preg_match('#^/files-pri/T0FAKE-(F[A-Z0-9]+)/download/#', $path, $match) && $request->method() === 'GET') {
+            if (! str_starts_with($request->header('Authorization')[0] ?? '', 'Bearer ')) {
+                return Factory::response('<html>Sign in</html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            $file = $this->files[$match[1]] ?? null;
+
+            return $file === null || ! $file['complete']
+                ? Factory::response('', 404)
+                : Factory::response((string) $file['bytes'], 200, ['Content-Type' => 'application/force-download']);
+        }
+
+        return Factory::response('', 404);
+    }
+
+    /** @var list<int|string> HTTP statuses for the next files.slack.com requests, or 'disconnect' */
+    protected array $fileOutages = [];
+
+    /**
+     * Answer the next `$times` upload or download requests on files.slack.com with an HTTP error, or drop them.
+     */
+    public function fileOutage(int $times = 1, int|string $status = 500): self
+    {
+        array_push($this->fileOutages, ...array_fill(0, $times, $status));
+
+        return $this;
+    }
+
+    /**
+     * Replace a file's bytes, as if someone had tampered with it.
+     */
+    public function corruptFile(string $id, string $bytes): void
+    {
+        $this->files[$id]['bytes'] = $bytes;
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function uploadUrl(array $params): PromiseInterface
+    {
+        $id = 'F'.strtoupper(substr(sha1((string) ++$this->counter), 0, 10));
+        $this->files[$id] = ['name' => (string) ($params['filename'] ?? ''), 'title' => '', 'bytes' => null, 'length' => (int) ($params['length'] ?? 0), 'complete' => false];
+
+        return $this->ok(['upload_url' => "https://files.slack.com/upload/v1/{$id}", 'file_id' => $id]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function completeUpload(array $params): PromiseInterface
+    {
+        $files = json_decode((string) ($params['files'] ?? '[]'), true);
+        $done = [];
+
+        foreach (is_array($files) ? $files : [] as $file) {
+            $id = (string) ($file['id'] ?? '');
+
+            if (! isset($this->files[$id]) || $this->files[$id]['bytes'] === null) {
+                return $this->error('upload_not_found');
+            }
+
+            $this->files[$id]['complete'] = true;
+            $this->files[$id]['title'] = (string) ($file['title'] ?? '');
+            $done[] = $this->fileObject($id);
+        }
+
+        return $this->ok(['files' => $done]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function fileInfo(array $params): PromiseInterface
+    {
+        $id = (string) ($params['file'] ?? '');
+
+        return isset($this->files[$id]) && $this->files[$id]['complete'] ? $this->ok(['file' => $this->fileObject($id)]) : $this->error('file_not_found');
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function deleteFile(array $params): PromiseInterface
+    {
+        $id = (string) ($params['file'] ?? '');
+
+        if (! isset($this->files[$id])) {
+            return $this->error('file_not_found');
+        }
+
+        unset($this->files[$id]);
+
+        return $this->ok([]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    protected function fileObject(string $id): array
+    {
+        $file = $this->files[$id];
+
+        return [
+            'id' => $id,
+            'name' => $file['name'],
+            'title' => $file['title'],
+            'size' => strlen((string) $file['bytes']),
+            'url_private_download' => "https://files.slack.com/files-pri/T0FAKE-{$id}/download/{$file['name']}",
+            'channels' => [],
+            'shares' => [],
+        ];
     }
 
     /**

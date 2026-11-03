@@ -11,7 +11,9 @@
  */
 
 use HelgeSverre\SlackCache\Codec;
+use HelgeSverre\SlackCache\Exceptions\SlackApiException;
 use HelgeSverre\SlackCache\SlackStore;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Cache;
 
 beforeEach(function () {
@@ -305,4 +307,60 @@ it('decorates with reactions on a real workspace', function () {
     $cache->flush();
     $left = $api->call('conversations.history', ['channel' => $channel->id, 'limit' => 50])['messages'];
     expect(array_filter($left, fn ($m) => ($m['subtype'] ?? null) === 'tombstone' || Codec::decode($m['text'] ?? '') !== null))->toBeEmpty();
+})->group('live');
+
+it('stores large values as files on a real workspace', function () {
+    config()->set('cache.stores.slack.files', true);
+    $cache = Cache::store('slack');
+    $keyspace = $cache->getStore()->keyspace();
+    $channel = $keyspace->channels()[0];
+    $cache->flush();
+
+    $big = random_bytes(60_000);
+    $cache->put('smoke:report', $big, 300);
+    expect($cache->get('smoke:report'))->toBe($big);
+
+    $record = null;
+    foreach ($channel->messages() as [, $text]) {
+        $record = Codec::decode($text);
+    }
+    expect($record[3])->not->toBeNull();
+    $file = $record[3][0];
+    expect($channel->download($file))->toBe(serialize($big));
+
+    // A cold replica downloads the file again.
+    Cache::store('replica')->flush();
+    app('cache')->forgetDriver('slack');
+    $cold = Cache::store('slack');
+    expect($cold->get('smoke:report'))->toBe($big);
+
+    // Forgetting the key deletes the file.
+    $cold->forget('smoke:report');
+    expect(fn () => $keyspace->api()->call('files.info', ['file' => $file]))
+        ->toThrow(SlackApiException::class, 'file_deleted');
+
+    $cold->flush();
+})->group('live');
+
+it('sets the channel topic on a real workspace and deletes the notice', function () {
+    $cache = Cache::store('slack');
+    $channel = $cache->getStore()->keyspace()->channels()[0];
+    $cache->flush();
+    $cache->put('smoke:topic', 'v', 7200);
+    $cache->forever('smoke:forever', 'v');
+
+    $this->artisan('slackcache:topic')->assertSuccessful();
+
+    expect($channel->topic())->toStartWith('2 keys · 1 never expires · ');
+
+    $notices = 0;
+    foreach (app(Factory::class)->withToken(getenv('SLACKCACHE_LIVE_TOKEN'))->withHeaders(config('cache.stores.slack.headers'))->asForm()
+        ->post(config('cache.stores.slack.base_url').'conversations.history', ['channel' => $channel->id, 'limit' => 5])->json('messages') as $message) {
+        $notices += ($message['subtype'] ?? null) === 'channel_topic' ? 1 : 0;
+    }
+    expect($notices)->toBe(0);
+
+    $cache->flush();
+    $this->artisan('slackcache:topic')->assertSuccessful();
+    expect($channel->topic())->toStartWith('0 keys · ');
 })->group('live');

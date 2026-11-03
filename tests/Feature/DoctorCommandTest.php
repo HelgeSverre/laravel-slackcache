@@ -54,6 +54,17 @@ it('warns that slackcache:topic needs channels:manage or channels:write.topic', 
     $this->artisan('slackcache:doctor')->doesntExpectOutputToContain('slackcache:topic needs it')->assertSuccessful();
 });
 
+it('checks the files scopes when the files option is on', function () {
+    config()->set('cache.stores.slack.files', true);
+
+    $this->artisan('slackcache:doctor')->expectsOutputToContain('granted for the files option')->assertSuccessful();
+
+    $this->slack->scopes = array_values(array_diff($this->slack->scopes, ['files:read']));
+    app('cache')->forgetDriver('slack');
+
+    $this->artisan('slackcache:doctor')->expectsOutputToContain('files:read')->assertFailed();
+});
+
 it('warns about a per-process replica', function () {
     config()->set('cache.stores.slack.replica', null);
 

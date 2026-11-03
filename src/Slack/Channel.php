@@ -169,6 +169,54 @@ class Channel
         return $names;
     }
 
+    /**
+     * Upload bytes as a file that is not shared in any channel, and return its ID. Only this token can read it.
+     */
+    public function upload(string $filename, string $title, string $bytes): string
+    {
+        $target = $this->api->call('files.getUploadURLExternal', ['filename' => $filename, 'length' => strlen($bytes)]);
+        $id = (string) $target['file_id'];
+
+        try {
+            $this->api->upload((string) $target['upload_url'], $bytes);
+            $this->api->call('files.completeUploadExternal', ['files' => [['id' => $id, 'title' => $title]]]);
+        } catch (\Throwable $e) {
+            try {
+                $this->deleteFile($id);
+            } catch (\Throwable) {
+                // The upload error is the one worth reporting.
+            }
+
+            throw $e;
+        }
+
+        return $id;
+    }
+
+    /**
+     * The bytes of a file this token can read.
+     */
+    public function download(string $file): string
+    {
+        $info = $this->api->call('files.info', ['file' => $file]);
+
+        return $this->api->download((string) ($info['file']['url_private_download'] ?? ''));
+    }
+
+    /**
+     * Delete a file. Deleting one that is already gone is not an error.
+     */
+    public function deleteFile(string $file): void
+    {
+        try {
+            $this->api->call('files.delete', ['file' => $file]);
+        } catch (SlackApiException $e) {
+            if (! in_array($e->error, ['file_not_found', 'file_deleted'], true)) {
+                throw $e;
+            }
+        }
+    }
+
     public function topic(): string
     {
         return (string) ($this->api->call('conversations.info', ['channel' => $this->id])['channel']['topic']['value'] ?? '');

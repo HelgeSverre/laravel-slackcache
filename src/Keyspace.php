@@ -8,6 +8,7 @@ use HelgeSverre\SlackCache\Events\KeyspaceReloaded;
 use HelgeSverre\SlackCache\Exceptions\SlackApiException;
 use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
 use HelgeSverre\SlackCache\Exceptions\TextMismatchException;
+use HelgeSverre\SlackCache\Exceptions\ValueTooLargeException;
 use HelgeSverre\SlackCache\Slack\Channel;
 use HelgeSverre\SlackCache\Slack\ChannelResolver;
 use HelgeSverre\SlackCache\Slack\Owner;
@@ -48,6 +49,9 @@ class Keyspace
 
     /** Re-sync a stale replica from a queued job instead of during the read. */
     protected bool $backgroundSync = false;
+
+    /** The largest value stored as a Slack file, in bytes, when `files` is on. Null: values must fit in a message. */
+    protected ?int $files = null;
 
     /** @var array{hot: int, expiring: int}|null Reaction thresholds, when reactions are on. */
     protected ?array $reactions = null;
@@ -112,6 +116,19 @@ class Keyspace
     public function useReactions(int $hot, int $expiring): void
     {
         $this->reactions = ['hot' => $hot, 'expiring' => $expiring];
+    }
+
+    /**
+     * Store values too large for a message as Slack files, up to `$maxBytes`.
+     */
+    public function useFiles(int $maxBytes): void
+    {
+        $this->files = $maxBytes;
+    }
+
+    public function filesEnabled(): bool
+    {
+        return $this->files !== null;
     }
 
     public function reactionsEnabled(): bool
@@ -237,11 +254,12 @@ class Keyspace
         }
 
         $old = $this->get($key);
-        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags, $emoji);
-
         $shard = $this->shardFor($key);
 
-        if ($this->history && $old !== null && $old->shard === $shard && ! $this->pastHalfLife($old)) {
+        if ($this->history && $old !== null && $old->shard === $shard && ! $this->pastHalfLife($old) && $this->fileOf($old->ts) === null
+            && ($encoded = $this->encodeInline($key, $value, $expireAt, $preview, $tags, $emoji)) !== null) {
+            [$text, $blocks] = $encoded;
+
             try {
                 return $this->edit($old, $text, $blocks, new Entry($key, $old->ts, $value, $expireAt, $shard), $tags, $emoji);
             } catch (SlackApiException $e) {
@@ -254,7 +272,7 @@ class Keyspace
             }
         }
 
-        $ts = $this->channels()[$shard]->post($text, $blocks);
+        $ts = $this->post($shard, $key, $value, $expireAt, $preview, $tags, $emoji);
         $entry = new Entry($key, $ts, $value, $expireAt, $shard);
 
         foreach ($this->liveGenerations() as $generation) {
@@ -375,8 +393,7 @@ class Keyspace
 
         $replaces = $plan;
         $shard = $this->shardFor($key);
-        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags, $emoji);
-        $ts = $this->channels()[$shard]->post($text, $blocks);
+        $ts = $this->post($shard, $key, $value, $expireAt, $preview, $tags, $emoji);
 
         $this->atomically($key, function () use ($key, $value, $expireAt, $seq, $replaces, $shard, $ts) {
             $raw = $this->raw($key);
@@ -449,6 +466,104 @@ class Keyspace
         if (is_string($target)) {
             $this->deleteMessage($this->channel($this->shardFor($key)), $target);
         }
+    }
+
+    /**
+     * Post a key's message and return its timestamp. A value too large for a message is uploaded as a file
+     * first, when `files` is on, and the message points to it.
+     *
+     * @param  list<string>  $tags
+     * @param  list<string>  $emoji
+     */
+    protected function post(int $shard, string $key, string $value, ?int $expireAt, ?string $preview, array $tags, array $emoji): string
+    {
+        $channel = $this->channels()[$shard];
+        $encoded = $this->encodeInline($key, $value, $expireAt, $preview, $tags, $emoji);
+
+        if ($encoded !== null) {
+            return $channel->post(...$encoded);
+        }
+
+        if (strlen($value) > (int) $this->files) {
+            throw ValueTooLargeException::forFile($key, strlen($value), (int) $this->files);
+        }
+
+        $file = $channel->upload('slackcache-'.substr(sha1($key), 0, 12).'.bin', mb_strimwidth(mb_scrub($key), 0, 200, '…'), $value);
+
+        try {
+            [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags, $emoji === [] ? [] : [...$emoji, 'paperclip'], $file);
+            $ts = $channel->post($text, $blocks);
+        } catch (\Throwable $e) {
+            $channel->deleteFile($file);
+
+            throw $e;
+        }
+
+        $this->rememberFile($ts, $file);
+
+        return $ts;
+    }
+
+    /**
+     * The message for a value that fits in one, or null when it needs a file. Throws when it does not fit and files are off.
+     *
+     * @param  list<string>  $tags
+     * @param  list<string>  $emoji
+     * @return array{0: string, 1: list<array<string, mixed>>}|null
+     */
+    protected function encodeInline(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, array $emoji): ?array
+    {
+        try {
+            return Codec::encode($key, $value, $expireAt, $preview, $tags, $emoji);
+        } catch (ValueTooLargeException $e) {
+            if ($this->files === null) {
+                throw $e;
+            }
+
+            // A key too long for even a pointer message is too long, file or not.
+            Codec::encode($key, '', $expireAt, null, [], [], 'F0');
+
+            return null;
+        }
+    }
+
+    /**
+     * Which file a message points to, as far as the replica knows. Recorded when posting and when reloading.
+     */
+    protected function fileOf(string $ts): ?string
+    {
+        if ($this->files === null || $ts === '') {
+            return null;
+        }
+
+        $file = $this->replica->get($this->namespace.':file:'.$ts);
+
+        return is_string($file) ? $file : null;
+    }
+
+    protected function rememberFile(string $ts, string $file): void
+    {
+        $retention = $this->retentionMs();
+
+        $retention === null
+            ? $this->replica->forever($this->namespace.':file:'.$ts, $file)
+            : $this->replica->put($this->namespace.':file:'.$ts, $file, intdiv($retention, 1000));
+    }
+
+    /**
+     * A file's bytes, or null if the file is gone or does not hold what its message says.
+     *
+     * @param  array{0: string, 1: string}  $file  [file ID, sha256]
+     */
+    protected function fetchFile(Channel $channel, array $file): ?string
+    {
+        try {
+            $bytes = $channel->download($file[0]);
+        } catch (SlackApiException) {
+            return null;
+        }
+
+        return hash_equals($file[1], hash('sha256', $bytes)) ? $bytes : null;
     }
 
     protected function rememberEverywhere(Entry $entry): void
@@ -603,13 +718,20 @@ class Keyspace
     /**
      * With history on, a key's message may have a thread: delete it too.
      */
-    protected function deleteMessage(?Channel $channel, string $ts): void
+    protected function deleteMessage(?Channel $channel, string $ts, ?string $file = null): void
     {
         if ($channel === null || $ts === '') {
             return;
         }
 
+        $file ??= $this->fileOf($ts);
+
         $this->history ? $channel->deleteThread($ts) : $channel->delete($ts);
+
+        if ($file !== null) {
+            $channel->deleteFile($file);
+            $this->replica->forget($this->namespace.':file:'.$ts);
+        }
     }
 
     /**
@@ -681,6 +803,8 @@ class Keyspace
         /** @var array<string, Entry> $entries */
         $entries = [];
         $stale = [];
+        /** @var array<string, array{0: string, 1: string}> $files File pointers by message ts. */
+        $files = [];
         $now = $this->now();
 
         foreach ($this->channels() as $shard => $channel) {
@@ -689,6 +813,10 @@ class Keyspace
 
                 if ($record === null) {
                     continue;
+                }
+
+                if ($record[3] !== null) {
+                    $files[$ts] = $record[3];
                 }
 
                 $entry = new Entry($record[0], $ts, $record[1], $record[2], $shard);
@@ -711,6 +839,14 @@ class Keyspace
         foreach ($entries as $entry) {
             if (! $entry->isLive($now, $this->retentionMs())) {
                 continue;
+            }
+
+            if (isset($files[$entry->ts])) {
+                $entry = $this->withFileValue($entry, $files[$entry->ts], $previous);
+
+                if ($entry === null) {
+                    continue; // The file is gone or damaged: a miss, not a wrong value.
+                }
             }
 
             $index[] = sha1($entry->key);
@@ -759,10 +895,31 @@ class Keyspace
         $this->dispatch(new KeyspaceReloaded($this->channelNames, $live, intdiv(hrtime(true) - $started, 1_000_000)));
 
         foreach ($stale as $entry) {
-            $this->deleteMessage($this->channels()[$entry->shard], $entry->ts);
+            $this->deleteMessage($this->channels()[$entry->shard], $entry->ts, $files[$entry->ts][0] ?? null);
         }
 
         return $live;
+    }
+
+    /**
+     * Fill in the value of an entry whose message points to a file: from the previous generation when it holds
+     * the same message, else by downloading the file. Null when the file cannot be read.
+     *
+     * @param  array{0: string, 1: string}  $file
+     */
+    protected function withFileValue(Entry $entry, array $file, int $previous): ?Entry
+    {
+        $this->rememberFile($entry->ts, $file[0]);
+
+        $known = $this->raw($entry->key, $previous);
+
+        if ($known instanceof Entry && $known->ts === $entry->ts && hash_equals($file[1], hash('sha256', $known->value))) {
+            $value = $known->value;
+        } else {
+            $value = $this->fetchFile($this->channels()[$entry->shard], $file);
+        }
+
+        return $value === null ? null : new Entry($entry->key, $entry->ts, $value, $entry->expireAt, $entry->shard);
     }
 
     /**
@@ -784,7 +941,7 @@ class Keyspace
                 $record = Codec::decode($text);
 
                 if ($record !== null && ! (new Entry($record[0], $ts, $record[1], $record[2]))->isLive($now, $this->retentionMs())) {
-                    $this->deleteMessage($channel, $ts);
+                    $this->deleteMessage($channel, $ts, $record[3][0] ?? null);
                     $reaped++;
                 }
             }
@@ -828,7 +985,7 @@ class Keyspace
                 $record = Codec::decode($text);
 
                 if ($record !== null && $matches($record[0])) {
-                    $this->deleteMessage($channel, $ts);
+                    $this->deleteMessage($channel, $ts, $record[3][0] ?? null);
                     $deleted++;
 
                     foreach ($this->liveGenerations() as $generation) {
@@ -843,6 +1000,7 @@ class Keyspace
 
     /**
      * Every live key, read from the channel history rather than the replica. Sorted by key.
+     * Values stored as files are not downloaded: their entries hold ''.
      *
      * @return list<Entry>
      */

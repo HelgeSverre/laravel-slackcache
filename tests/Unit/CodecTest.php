@@ -15,7 +15,7 @@ it('encodes the same text as the Python server', function (string $key, string $
 })->with('python fixtures');
 
 it('decodes text written by the Python server', function (string $key, string $value, ?int $expireAt, string $text) {
-    expect(Codec::decode($text))->toBe([$key, $value, $expireAt]);
+    expect(Codec::decode($text))->toBe([$key, $value, $expireAt, null]);
 })->with('python fixtures');
 
 it('ignores messages that are not cache entries', function (?string $text) {

@@ -141,6 +141,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
         $keyspace = self::keyspace($api, $replica, $channels, $config, (bool) ($config['history'] ?? false));
         self::configureQueue($app, $keyspace, $config);
         self::configureReactions($keyspace, $config);
+        self::configureFiles($keyspace, $config);
 
         return new SlackStore(
             $keyspace,
@@ -207,6 +208,26 @@ class SlackCacheServiceProvider extends PackageServiceProvider
         );
 
         return $keyspace;
+    }
+
+    /** The default for `files.max_bytes`: 10 MB. */
+    public const int MAX_FILE_BYTES = 10_485_760;
+
+    /**
+     * `files`: true for the default limit, or ['max_bytes' => bytes].
+     *
+     * @param  array<string, mixed>  $config
+     */
+    protected static function configureFiles(Keyspace $keyspace, array $config): void
+    {
+        $files = $config['files'] ?? false;
+
+        if (! $files) {
+            return;
+        }
+
+        $options = is_array($files) ? $files : [];
+        $keyspace->useFiles(max(1, (int) ($options['max_bytes'] ?? self::MAX_FILE_BYTES)));
     }
 
     /**

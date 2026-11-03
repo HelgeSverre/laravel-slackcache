@@ -21,20 +21,24 @@ final class Codec
 
     public const int PREVIEW = 1_500;
 
+    /** Starts the value field of a message whose value is in a Slack file: `@<file ID>:<sha256 of the value>`. */
+    public const string FILE = '@';
+
     /**
      * @param  list<string>  $tags  Cache tags, shown in the preview.
      * @param  list<string>  $emoji  Slack emoji names shown before the header, such as `lock`.
+     * @param  string|null  $file  The ID of a Slack file holding the value. The text then points to it instead of holding it.
      * @return array{0: string, 1: list<array<string, mixed>>}
      *
      * @throws ValueTooLargeException
      */
-    public static function encode(string $key, string $value, ?int $expireAt = null, ?string $preview = null, array $tags = [], array $emoji = []): array
+    public static function encode(string $key, string $value, ?int $expireAt = null, ?string $preview = null, array $tags = [], array $emoji = [], ?string $file = null): array
     {
         $text = implode(' ', [
             self::MARKER,
             base64_encode($key),
             $expireAt === null ? '-' : (string) $expireAt,
-            base64_encode($value),
+            $file === null ? base64_encode($value) : self::FILE.$file.':'.hash('sha256', $value),
         ]);
 
         if (strlen($text) > self::MAX_TEXT) {
@@ -46,7 +50,8 @@ final class Codec
             ...($emoji === [] ? [] : [['type' => 'text', 'text' => ' ']]),
             ['type' => 'text', 'text' => 'SET ', 'style' => ['bold' => true]],
             ['type' => 'text', 'text' => self::show($key, 200), 'style' => ['code' => true]],
-            ['type' => 'text', 'text' => self::expiryNote($expireAt).($tags === [] ? '' : ' · tags: '.implode(', ', $tags))],
+            ['type' => 'text', 'text' => self::expiryNote($expireAt).($tags === [] ? '' : ' · tags: '.implode(', ', $tags))
+                .($file === null ? '' : ' · stored as a file, '.number_format(strlen($value)).' bytes')],
         ];
 
         $blocks = [[
@@ -63,9 +68,11 @@ final class Codec
     }
 
     /**
-     * Return [key, value, expireAt] from a message's text, or null if the message is not ours.
+     * Return [key, value, expireAt, file] from a message's text, or null if the message is not ours.
      *
-     * @return array{0: string, 1: string, 2: int|null}|null
+     * When the value is in a Slack file, value is '' and file is [file ID, sha256 of the value]. Otherwise file is null.
+     *
+     * @return array{0: string, 1: string, 2: int|null, 3: array{0: string, 1: string}|null}|null
      */
     public static function decode(?string $text): ?array
     {
@@ -76,21 +83,31 @@ final class Codec
         }
 
         $key = base64_decode($parts[1], true);
-        $value = base64_decode($parts[3], true);
+        $file = null;
+
+        if (str_starts_with($parts[3], self::FILE)) {
+            if (! preg_match('/^@([A-Z0-9]+):([0-9a-f]{64})$/', $parts[3], $match)) {
+                return null;
+            }
+
+            [$value, $file] = ['', [$match[1], $match[2]]];
+        } else {
+            $value = base64_decode($parts[3], true);
+        }
 
         if ($key === false || $value === false) {
             return null;
         }
 
         if ($parts[2] === '-') {
-            return [$key, $value, null];
+            return [$key, $value, null, $file];
         }
 
         if (! preg_match('/^-?\d+$/', $parts[2])) {
             return null;
         }
 
-        return [$key, $value, (int) $parts[2]];
+        return [$key, $value, (int) $parts[2], $file];
     }
 
     private static function show(string $data, int $limit): string

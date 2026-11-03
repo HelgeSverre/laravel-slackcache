@@ -25,7 +25,7 @@ it('stores and reads a value through Slack', function () {
 
     $messages = $this->slack->messages('slackcache');
     expect($messages)->toHaveCount(1)
-        ->and(Codec::decode(reset($messages)['text']))->toBe(['hello', serialize('world'), 1_800_000_060_000]);
+        ->and(Codec::decode(reset($messages)['text']))->toBe(['hello', serialize('world'), 1_800_000_060_000, null]);
 });
 
 it('creates and joins the channel on first use', function () {

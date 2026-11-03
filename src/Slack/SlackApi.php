@@ -9,6 +9,7 @@ use HelgeSverre\SlackCache\Exceptions\SlackApiException;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory as HttpFactory;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Sleep;
 
 /**
@@ -152,6 +153,73 @@ class SlackApi
             }
 
             return $result;
+        }
+    }
+
+    /**
+     * Send a file's bytes to the upload URL files.getUploadURLExternal handed out.
+     *
+     * @throws SlackApiException
+     */
+    public function upload(string $url, string $bytes): void
+    {
+        $this->raw('files.upload', fn () => $this->http
+            ->withHeaders($this->headers)
+            ->timeout($this->timeout)
+            ->withBody($bytes, 'application/octet-stream')
+            ->post($url));
+    }
+
+    /**
+     * Download a private file (url_private_download) with this token.
+     *
+     * @throws SlackApiException
+     */
+    public function download(string $url): string
+    {
+        return $this->raw('files.download', fn () => $this->http
+            ->withToken($this->token)
+            ->withHeaders($this->headers)
+            ->timeout($this->timeout)
+            ->get($url));
+    }
+
+    /**
+     * A request outside the Web API (file uploads and downloads), with the same retries for server errors
+     * and dropped connections.
+     *
+     * @param  Closure(): Response  $send
+     *
+     * @throws SlackApiException
+     */
+    protected function raw(string $label, Closure $send): string
+    {
+        $attempt = 0;
+
+        while (true) {
+            try {
+                $response = $send();
+            } catch (ConnectionException $e) {
+                if ($attempt < $this->retries) {
+                    $this->backOff($label, 'connection_failed', ++$attempt);
+
+                    continue;
+                }
+
+                throw new SlackApiException($label, 'connection_failed', $e);
+            }
+
+            if (($response->serverError() || $response->status() === 429) && $attempt < $this->retries) {
+                $this->backOff($label, 'http_'.$response->status(), ++$attempt);
+
+                continue;
+            }
+
+            if (! $response->successful()) {
+                throw new SlackApiException($label, 'http_'.$response->status());
+            }
+
+            return $response->body();
         }
     }
 

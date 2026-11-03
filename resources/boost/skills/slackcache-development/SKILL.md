@@ -29,7 +29,7 @@ Choose options by need:
 | --- | --- |
 | Writes must not block the request | `'async' => true` and a queue worker |
 | Reads must never wait for a re-sync | `'sync' => 'background'` |
-| Values over ~11.9 KB | `'compress' => true` |
+| Values over ~11.9 KB | `'compress' => true`, then `'files' => true` (adds `files:read`, `files:write`) |
 | Secrets in values | `'encrypt' => true` (uses `APP_KEY`) |
 | More than ~1 write per second | `'shards' => N` |
 | Slack outages must not break the app | a `failover` store: `['slack', 'file']`, with `'retries' => 0` and a short `'timeout'` on the slack store |
@@ -64,6 +64,6 @@ $slack->fail('channel_not_found');
 ## Troubleshoot
 
 1. Run `php artisan slackcache:doctor`. It checks the token, scopes, channels, posting, history and the replica, and names what is missing.
-2. `ValueTooLargeException`: turn on `compress`, or store less.
+2. `ValueTooLargeException`: turn on `compress`, then `files`.
 3. A forgotten key comes back: servers use separate replicas. Give them a shared `redis` or `database` replica.
 4. Slow requests: every write waits for Slack. Use `async`.

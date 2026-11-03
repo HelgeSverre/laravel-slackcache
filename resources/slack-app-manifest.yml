@@ -18,6 +18,8 @@ oauth_config:
       - channels:join
       - channels:manage
       - reactions:write # Only for the reactions option
+      - files:read # Only for the files option
+      - files:write # Only for the files option
 settings:
   org_deploy_enabled: false
   socket_mode_enabled: false

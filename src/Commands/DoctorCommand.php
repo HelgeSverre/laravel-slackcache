@@ -65,6 +65,14 @@ class DoctorCommand extends Command
                 ? $this->passed('Scopes', implode(', ', $scopes))
                 : $this->failed('Scopes', 'missing '.implode(', ', $missing));
 
+            if ($config['files'] ?? false) {
+                $missingFiles = array_values(array_diff(['files:read', 'files:write'], $scopes));
+
+                $missingFiles === []
+                    ? $this->passed('files:read, files:write', 'granted for the files option')
+                    : $this->failed(implode(', ', $missingFiles), 'missing; the files option needs it');
+            }
+
             if (($config['reactions'] ?? false) && ! in_array('reactions:write', $scopes, true)) {
                 $this->failed('reactions:write', 'missing; the reactions option needs it');
             }

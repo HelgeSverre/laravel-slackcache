@@ -2,6 +2,20 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.10.0 - 2026-11-03
+
+### Added
+
+- `files` option: a value too large for a message is uploaded as a Slack file, not shared in any channel, and the message points to it (`@<file ID>:<sha256>`). Up to `max_bytes`, default 10 MB. Reloads download each file once and reuse it while the message is unchanged; a missing or tampered file is a miss. Replacing, forgetting, reaping and flushing a key delete its file. A failed post or upload deletes the file again.
+- With `files` and `emoji` on, file-backed previews get `:paperclip:` and say how many bytes the file holds.
+- `files:read` and `files:write` in the app manifest; `slackcache:doctor` checks them when `files` is on.
+- `FakeSlack` emulates `files.getUploadURLExternal`, `files.completeUploadExternal`, `files.info`, `files.delete` and the upload and download URLs, with `fileOutage()` and `corruptFile()`.
+
+### Changed
+
+- `Codec::decode()` returns a fourth element: the file pointer, or null.
+- With `history` on, a key whose old or new value is a file is reposted instead of edited.
+
 ## v0.9.0 - 2026-11-03
 
 ### Added

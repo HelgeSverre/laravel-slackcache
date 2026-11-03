@@ -94,6 +94,7 @@ SLACKCACHE_TOKEN=xoxb-...
 | `reactions` | `false` | `true`, or `['hot' => 100, 'expiring' => 3600]`: let `slackcache:decorate` react to hot, expiring and expired keys. See [Reactions](#reactions). |
 | `encrypt` | `false` | Encrypt values with your `APP_KEY`. See [Encryption](#encryption). |
 | `compress` | `false` | Compress values before storing them. See [Compression](#compression). |
+| `files` | `false` | `true`, or `['max_bytes' => 10485760]`: store values too large for a message as Slack files. See [Large values](#large-values). |
 | `headers` / `base_url` | none / `https://slack.com/api/` | For proxies and other unusual networks. |
 
 To make Slack your default cache, set `CACHE_STORE=slack`. Do not set the replica to the Slack store itself. The driver checks for this, because someone would.
@@ -262,6 +263,35 @@ Notes:
 - With `encrypt` on too, values are compressed first, then encrypted.
 - Compressed values carry a marker, so turning compression off later still reads them. The Python SlackCache server sees the raw compressed bytes.
 - Needs PHP's zlib extension, which almost every PHP build has.
+
+## Large values
+
+One Slack message holds about 11.9 KB of value. With `files` on, a larger value is uploaded to Slack as a file, and the key's message holds a pointer to it instead:
+
+```php
+'slack' => [
+    'driver' => 'slack',
+    // ...
+    'files' => true, // or ['max_bytes' => 10 * 1024 * 1024]
+],
+```
+
+```
+📎 SET `reports:2026` · no TTL (the free plan evicts it in 90 days) · stored as a file, 2,483,112 bytes
+```
+
+The file is uploaded without sharing it in any channel, so it does not appear in the channel, and only the token that uploaded it can read it. The message keeps the readable preview. Values that fit in a message are stored as before; `files` only changes what happens instead of `ValueTooLargeException`.
+
+| | |
+| --- | --- |
+| Pointer | `slackcache:v1 <base64 key> <expiry> @<file ID>:<sha256>`. The hash is checked on download; a mismatch is a cache miss. |
+| Reads | From the replica, as always. A reload downloads each large value once and reuses it while the message is unchanged. |
+| Writes | Upload (3 calls), then post. If the post fails, the file is deleted again. |
+| Deletes | Replacing, forgetting, reaping and flushing a key delete its file too. |
+| Limit | `max_bytes`, default 10 MB, after compression and encryption. Larger values still throw `ValueTooLargeException`. |
+| Scopes | `files:write` and `files:read`. `slackcache:doctor` checks them when `files` is on. |
+
+With `history` on, a key whose new or old value is a file is reposted instead of edited, starting a new thread. The original Python server ignores pointer messages, as it ignores everything else it does not understand.
 
 ## Cache tags
 
@@ -605,7 +635,7 @@ Reads are about 50,000 times faster than writes. This is the correct way round f
 
 ## Limits
 
-- **Value size.** One key and value must fit in one Slack message: 16,000 characters of base64, about 11.9 KB of value. Larger values throw `ValueTooLargeException`. Turn on [compression](#compression), consider a smaller value, or a database.
+- **Value size.** One key and value must fit in one Slack message: 16,000 characters of base64, about 11.9 KB of value. Larger values throw `ValueTooLargeException`. Turn on [compression](#compression), or [files](#large-values) for up to 10 MB, consider a smaller value, or a database.
 - **Write rate.** `chat.postMessage` allows about one message per second per channel, with short bursts. Use [shards](#sharding) for more.
 - **Reads of the channel.** History and deletes are Tier 3 (about 50 per minute). `flush()` on a large keyspace takes minutes. So does `slackcache:load`.
 - **Atomicity.** `add`, `increment` and locks are atomic across processes that share a replica supporting locks (`redis`, `database`, `file`). Reloads take the same lock, so one process re-reads the channel while the others wait.
