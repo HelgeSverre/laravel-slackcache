@@ -22,6 +22,8 @@ class DoctorCommand extends Command
 
     public function handle(): int
     {
+        $this->failures = 0; // The same instance can run twice in one process (Artisan::call).
+
         $option = $this->option('store');
         $name = is_string($option) && $option !== '' ? $option : 'slack';
         $config = (array) config("cache.stores.{$name}", []);

@@ -194,7 +194,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
     {
         $reactions = $config['reactions'] ?? false;
 
-        if ($reactions === false || $reactions === null) {
+        if ($reactions === false) {
             return $keyspace;
         }
 
