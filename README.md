@@ -183,7 +183,7 @@ Notes:
 - Previews and history replies show `(encrypted)`.
 - A value that cannot be decrypted, after a key change say, is a cache miss.
 - Values written before you turned encryption on are still read. New writes are encrypted.
-- Encryption adds about a third to the stored size, plus around 200 characters. Combine it with compression to win that back.
+- Laravel's encrypted payload is about 1.8 times the size of the value, plus around 200 characters, so the largest value that fits drops to about 6.5 KB. Combine it with compression to win that back.
 
 ## Compression
 
