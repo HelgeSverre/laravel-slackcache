@@ -87,6 +87,9 @@ SLACKCACHE_TOKEN=xoxb-...
 | `prefix` | `cache.prefix` | Key prefix, as for other stores. |
 | `timeout` | `60` | HTTP timeout in seconds. A throttled write can take several. |
 | `retries` | `5` | How many times to retry a call. HTTP 429s wait for Slack's `Retry-After`; server errors and dropped connections back off 1, 2, 4 … seconds, at most 30. |
+| `sync` | `inline` | `background`: re-sync a stale replica from a queued job while reads carry on. See [Background sync](#background-sync). |
+| `async` | `false` | Write the replica at once and Slack from a queued job. See [Write-behind](#write-behind). |
+| `queue_connection` / `queue` | default | Where the `sync` and `async` jobs run. |
 | `encrypt` | `false` | Encrypt values with your `APP_KEY`. See [Encryption](#encryption). |
 | `compress` | `false` | Compress values before storing them. See [Compression](#compression). |
 | `headers` / `base_url` | none / `https://slack.com/api/` | For proxies and other unusual networks. |
@@ -159,6 +162,58 @@ Each command takes `--store=` if your store is not called `slack`.
 ```
 
 It posts one message and deletes it again. It creates the channel if it does not exist, as the first write would. Scopes are checked for bot and user tokens; other token types report Slack's own scopes, which say nothing about this app.
+
+## Background sync
+
+By default, the read that finds the replica older than `sync_interval` re-reads the channel before it returns. On a large keyspace that read waits seconds. Set `'sync' => 'background'` and it returns from the replica at once, and a queued job re-reads the channel:
+
+```php
+'slack' => [
+    'driver' => 'slack',
+    // ...
+    'sync' => 'background',
+    'queue' => 'slackcache', // optional
+],
+```
+
+Notes:
+
+- One re-sync job is queued at a time per channel set.
+- A cold replica, one that has never loaded, still loads during the read: there is nothing to serve yet.
+- While a job is queued, reads serve what the replica has. Entries stay in the replica for at least an hour, so a slow queue means older data, not misses.
+- On the `sync` queue driver the job runs straight away, which is the inline behaviour with extra steps.
+
+## Write-behind
+
+A write waits for Slack: about 1.3 seconds. Set `'async' => true` and `put`, `forever`, `increment`, `add`, `touch` and `forget` update the replica and return; a queued job writes Slack:
+
+```php
+'slack' => [
+    'driver' => 'slack',
+    // ...
+    'replica' => 'redis',
+    'async' => true,
+    'queue' => 'slackcache',
+],
+```
+
+```php
+Cache::store('slack')->put('greeting', 'Hello', 3600); // Milliseconds. Slack hears about it shortly.
+Cache::store('slack')->get('greeting');                // 'Hello', from the replica
+```
+
+Each write gets a sequence number. A queued job that finds the key has changed since, written again, forgotten or flushed, skips itself. So jobs that run late, twice or out of order never put an older value in Slack.
+
+Trade-offs, all of which come with write-behind caches in general:
+
+- **Durability.** Until its job runs, a write exists only in the replica. If the replica is lost first (an `array` replica and the process ends, say), so is the write. Use `redis` or `database`.
+- **Other servers** with separate replicas see a write after its job has run and they have synced. With a shared replica they see it at once.
+- **Reloads.** A re-sync keeps queued writes and deletes for keys already in the channel. A brand-new key whose job has not run yet is missing after a re-sync until the job runs.
+- **Failed jobs** retry as your queue is configured. A job that gives up leaves the write in the replica only.
+- **Not with `history`.** History replies need each write to see the one before it; the driver refuses the combination.
+- **Flush and locks stay synchronous.** `flush()` deletes from Slack before it returns, and queued writes from before it are dropped.
+
+On the `sync` queue driver jobs run straight away, so `async` behaves like the default.
 
 ## Encryption
 
@@ -429,7 +484,7 @@ Measured against a real workspace on 2026-11-03 (one channel, in-process replica
 | `put` | 1,259–1,321 ms |
 | `get` | 0.024 ms |
 
-Reads are about 50,000 times faster than writes. This is the correct way round for a cache.
+Reads are about 50,000 times faster than writes. This is the correct way round for a cache. If it is not the way round you wanted, see [Write-behind](#write-behind).
 
 ## Limits
 

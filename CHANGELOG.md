@@ -2,6 +2,20 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.6.0 - 2026-11-03
+
+### Added
+
+- `sync => 'background'`: a stale replica keeps serving reads while a queued `ReloadKeyspace` job re-reads the channel. One job at a time; a cold replica still loads inline.
+- `async => true` (write-behind): writes and deletes update the replica at once and reach Slack through queued `WriteToSlack` and `DeleteFromSlack` jobs. Sequence numbers make stale, repeated or out-of-order jobs skip themselves, and a flush drops writes queued before it.
+- `queue_connection` and `queue` options for those jobs.
+
+### Changed
+
+- Requires `illuminate/bus` and `illuminate/queue` (part of every Laravel app).
+- The per-key replica lock is reentrant within a process.
+- With `sync => 'background'`, replica entries live at least an hour, so a slow queue serves older data instead of misses.
+
 ## v0.5.0 - 2026-11-03
 
 ### Added
