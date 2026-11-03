@@ -51,6 +51,9 @@ class Keyspace
 
     protected readonly string $namespace;
 
+    /** How long the replica keeps a queued write or delete whose job has not run. */
+    public const int PENDING_SECONDS = 86_400;
+
     /** @var array<string, true> Replica locks this process holds, so atomically() can nest. */
     protected array $held = [];
 
@@ -164,6 +167,15 @@ class Keyspace
     {
         $this->ensureLoaded();
 
+        // Under the key's lock, so a job committing an older write cannot overwrite this pending one.
+        return $this->atomically($key, fn () => $this->queueWrite($key, $value, $expireAt, $preview, $tags));
+    }
+
+    /**
+     * @param  list<string>  $tags
+     */
+    protected function queueWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags): Entry
+    {
         // The message this write will replace: the current entry's, or a deleted entry's not yet removed from Slack.
         $raw = $this->raw($key);
         $replaces = $raw instanceof Entry ? $raw->ts : (is_array($raw) ? $raw[1] : '');
@@ -175,7 +187,8 @@ class Keyspace
             $this->remember($generation, $entry);
         }
 
-        $this->queueJob(new Jobs\WriteToSlack($this->storeName, $key, $value, $expireAt, $preview, $tags, $seq));
+        $this->trackPending($key, true);
+        $this->queueJob(new Jobs\WriteToSlack($this->storeName, $key, $value, $expireAt, $preview, $tags, $seq, $replaces));
 
         return $entry;
     }
@@ -184,6 +197,11 @@ class Keyspace
      * Write-behind: hide the key now and queue the Slack delete.
      */
     protected function removeLater(string $key): bool
+    {
+        return $this->atomically($key, fn () => $this->queueRemove($key));
+    }
+
+    protected function queueRemove(string $key): bool
     {
         $entry = $this->get($key);
 
@@ -197,7 +215,8 @@ class Keyspace
             $this->replica->put($this->entryKey($key, $generation), ['deleted', $entry->ts, $seq], $this->tombstoneTtl());
         }
 
-        $this->queueJob(new Jobs\DeleteFromSlack($this->storeName, $key, $seq));
+        $this->trackPending($key, true);
+        $this->queueJob(new Jobs\DeleteFromSlack($this->storeName, $key, $seq, $entry->ts));
 
         return true;
     }
@@ -207,9 +226,9 @@ class Keyspace
      *
      * @param  list<string>  $tags
      */
-    public function commitWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, int $seq): void
+    public function commitWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, int $seq, string $replaces = ''): void
     {
-        $this->atomically($key, function () use ($key, $value, $expireAt, $preview, $tags, $seq) {
+        $this->atomically($key, function () use ($key, $value, $expireAt, $preview, $tags, $seq, $replaces) {
             if ($seq <= $this->flushedSeq()) {
                 return; // Written before a flush.
             }
@@ -224,7 +243,8 @@ class Keyspace
                 return; // Deleted after this write; the delete job removes the message.
             }
 
-            $replaces = $raw instanceof Entry ? $raw->ts : (is_array($raw) ? $raw[1] : '');
+            // The replica's record is current. If it has expired, fall back to what was known when the job was queued.
+            $replaces = $raw instanceof Entry ? $raw->ts : (is_array($raw) ? $raw[1] : $replaces);
             $shard = $this->shardFor($key);
             [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
             $ts = $this->channels()[$shard]->post($text, $blocks);
@@ -236,15 +256,17 @@ class Keyspace
             if ($replaces !== '' && $replaces !== $ts) {
                 $this->deleteMessage($this->channel($raw instanceof Entry ? $raw->shard : $shard), $replaces);
             }
+
+            $this->trackPending($key, false);
         });
     }
 
     /**
      * Run by DeleteFromSlack: delete a queued delete's message, unless the key was written again since.
      */
-    public function commitDelete(string $key, int $seq): void
+    public function commitDelete(string $key, int $seq, string $ts = ''): void
     {
-        $this->atomically($key, function () use ($key, $seq) {
+        $this->atomically($key, function () use ($key, $seq, $ts) {
             if ($seq <= $this->flushedSeq()) {
                 return;
             }
@@ -252,15 +274,24 @@ class Keyspace
             $raw = $this->raw($key);
 
             // A newer write took over the message to replace; it deletes it when it posts.
-            if (! is_array($raw) || $raw[2] !== $seq || $raw[1] === '') {
+            if (($raw instanceof Entry && $raw->seq > $seq) || (is_array($raw) && $raw[2] > $seq)) {
                 return;
             }
 
-            $this->deleteMessage($this->channel($this->shardFor($key)), $raw[1]);
+            // The tombstone knows the message. If it has expired, use what was known when the job was queued.
+            $ts = is_array($raw) && $raw[2] === $seq ? $raw[1] : $ts;
+
+            if ($raw instanceof Entry && $raw->ts !== $ts) {
+                return; // The key was reloaded from a newer message; leave it.
+            }
+
+            $this->deleteMessage($this->channel($this->shardFor($key)), $ts);
 
             foreach ($this->liveGenerations() as $generation) {
                 $this->replica->put($this->entryKey($key, $generation), ['deleted', '', $seq], $this->tombstoneTtl());
             }
+
+            $this->trackPending($key, false);
         });
     }
 
@@ -292,6 +323,24 @@ class Keyspace
         return Entry::tryFrom($data);
     }
 
+    /**
+     * The keys with a queued write or delete, so a reload can carry them over even when Slack has never seen them.
+     */
+    protected function trackPending(string $key, bool $pending): void
+    {
+        $this->atomically("\0pending", function () use ($key, $pending) {
+            $keys = (array) $this->replica->get($this->namespace.':pending', []);
+
+            if ($pending) {
+                $keys[$key] = true;
+            } else {
+                unset($keys[$key]);
+            }
+
+            $this->replica->put($this->namespace.':pending', $keys, self::PENDING_SECONDS);
+        });
+    }
+
     protected function nextSeq(): int
     {
         return (int) $this->replica->increment($this->namespace.':seq');
@@ -302,9 +351,20 @@ class Keyspace
         return (int) $this->replica->get($this->namespace.':flushed-seq', 0);
     }
 
+    /**
+     * Queued writes and deletes exist only in the replica until their job runs: keep them for a day, whatever
+     * the sync interval, unless the key's own TTL ends sooner.
+     */
+    protected function pendingTtl(?int $deadline): int
+    {
+        $seconds = $deadline === null ? self::PENDING_SECONDS : (int) ceil(($deadline - $this->now()) / 1000);
+
+        return min($seconds, self::PENDING_SECONDS);
+    }
+
     protected function tombstoneTtl(): int
     {
-        return max(3600, $this->entryTtl(null) ?? 86_400);
+        return $this->async ? self::PENDING_SECONDS : max(3600, $this->entryTtl(null) ?? self::PENDING_SECONDS);
     }
 
     protected function queueJob(object $job): void
@@ -493,6 +553,21 @@ class Keyspace
                 $this->replica->put($this->entryKey($entry->key, $generation), $queued, $this->tombstoneTtl());
             } else {
                 $this->remember($generation, $entry);
+            }
+        }
+
+        // Queued writes for keys Slack has never seen are not in the snapshot. Carry them over too.
+        foreach (array_keys((array) $this->replica->get($this->namespace.':pending', [])) as $key) {
+            $key = (string) $key;
+
+            if (! $this->replica->has($this->entryKey($key, $generation))) {
+                $queued = $this->raw($key, $previous);
+
+                if ($queued instanceof Entry) {
+                    $this->remember($generation, $queued);
+                } elseif (is_array($queued)) {
+                    $this->replica->put($this->entryKey($key, $generation), $queued, $this->tombstoneTtl());
+                }
             }
         }
 
@@ -819,7 +894,9 @@ class Keyspace
     protected function remember(int $generation, Entry $entry): void
     {
         $key = $this->entryKey($entry->key, $generation);
-        $seconds = $this->entryTtl($entry->deadline($this->retentionMs()));
+        $seconds = $entry->pending
+            ? $this->pendingTtl($entry->deadline($this->retentionMs()))
+            : $this->entryTtl($entry->deadline($this->retentionMs()));
 
         if ($seconds === null) {
             $this->replica->forever($key, $entry->toArray());

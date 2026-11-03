@@ -180,7 +180,7 @@ Notes:
 
 - One re-sync job is queued at a time per channel set.
 - A cold replica, one that has never loaded, still loads during the read: there is nothing to serve yet.
-- While a job is queued, reads serve what the replica has. Entries stay in the replica for at least an hour, so a slow queue means older data, not misses.
+- While a job is queued, reads serve what the replica has. Entries stay in the replica for at least an hour (or until their own TTL ends), so a slow queue means older data, not misses.
 - On the `sync` queue driver the job runs straight away, which is the inline behaviour with extra steps.
 
 ## Write-behind
@@ -206,9 +206,9 @@ Each write gets a sequence number. A queued job that finds the key has changed s
 
 Trade-offs, all of which come with write-behind caches in general:
 
-- **Durability.** Until its job runs, a write exists only in the replica. If the replica is lost first (an `array` replica and the process ends, say), so is the write. Use `redis` or `database`.
+- **Durability.** Until its job runs, a write exists only in the replica, which keeps it for up to a day. If the replica is lost first (an `array` replica and the process ends, say), so is the write. Use `redis` or `database`.
 - **Other servers** with separate replicas see a write after its job has run and they have synced. With a shared replica they see it at once.
-- **Reloads.** A re-sync keeps queued writes and deletes for keys already in the channel. A brand-new key whose job has not run yet is missing after a re-sync until the job runs.
+- **Reloads.** A re-sync keeps queued writes and deletes, including keys Slack has not seen yet.
 - **Failed jobs** retry as your queue is configured. A job that gives up leaves the write in the replica only.
 - **Not with `history`.** History replies need each write to see the one before it; the driver refuses the combination.
 - **Flush and locks stay synchronous.** `flush()` deletes from Slack before it returns, and queued writes from before it are dropped.

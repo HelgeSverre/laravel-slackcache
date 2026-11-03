@@ -195,3 +195,30 @@ it('refuses to combine async with history', function () {
 
     Cache::store('slack');
 })->throws(SlackCacheException::class, 'history');
+
+it('keeps a pending write in the replica while the queue is slow', function () {
+    Queue::fake();
+    Cache::store('slack')->put('k', 'v', 86_400);
+
+    $this->travel(30)->minutes();
+
+    expect(Cache::store('slack')->get('k'))->toBe('v');
+
+    runSlackJobs();
+
+    expect(slackValues($this->slack))->toBe([serialize('v')]);
+});
+
+it('still deletes the message when a delete job runs very late', function () {
+    Queue::fake();
+    $cache = Cache::store('slack');
+    $cache->forever('k', 'v');
+    runSlackJobs([0]);
+    $cache->forget('k');
+
+    $this->travel(2)->days(); // The replica's tombstone is long gone.
+
+    runSlackJobs([1]);
+
+    expect($this->slack->messages('slackcache'))->toBeEmpty();
+});

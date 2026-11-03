@@ -32,6 +32,7 @@ class WriteToSlack implements ShouldQueue
         ?string $preview,
         public array $tags,
         public int $seq,
+        public string $replaces = '',
     ) {
         $this->key = base64_encode($key);
         $this->value = base64_encode($value);
@@ -50,6 +51,7 @@ class WriteToSlack implements ShouldQueue
                 $this->preview === null ? null : (string) base64_decode($this->preview, true),
                 $this->tags,
                 $this->seq,
+                $this->replaces,
             );
         }
     }

@@ -9,6 +9,7 @@ All notable changes to `laravel-slackcache` will be documented in this file.
 - `sync => 'background'`: a stale replica keeps serving reads while a queued `ReloadKeyspace` job re-reads the channel. One job at a time; a cold replica still loads inline.
 - `async => true` (write-behind): writes and deletes update the replica at once and reach Slack through queued `WriteToSlack` and `DeleteFromSlack` jobs. Sequence numbers make stale, repeated or out-of-order jobs skip themselves, and a flush drops writes queued before it.
 - `queue_connection` and `queue` options for those jobs.
+- Queued writes and deletes stay in the replica for up to a day while their jobs wait, and re-syncs carry them over, including keys Slack has not seen yet.
 
 ### Changed
 

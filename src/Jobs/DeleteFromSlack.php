@@ -21,6 +21,7 @@ class DeleteFromSlack implements ShouldQueue
         public string $store,
         string $key,
         public int $seq,
+        public string $ts = '',
     ) {
         $this->key = base64_encode($key);
     }
@@ -30,7 +31,7 @@ class DeleteFromSlack implements ShouldQueue
         $store = $cache->store($this->store)->getStore();
 
         if ($store instanceof SlackStore) {
-            $store->keyspace()->commitDelete((string) base64_decode($this->key, true), $this->seq);
+            $store->keyspace()->commitDelete((string) base64_decode($this->key, true), $this->seq, $this->ts);
         }
     }
 }
