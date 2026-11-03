@@ -200,3 +200,44 @@ it('writes behind and re-syncs in the background on a real workspace (sync queue
 
     $cache->flush();
 })->group('live');
+
+it('shows status emoji in previews on a real workspace', function () {
+    config()->set('app.key', 'base64:'.base64_encode(random_bytes(32)));
+    config()->set('cache.stores.slack.emoji', true);
+    config()->set('cache.stores.slack.encrypt', true);
+    config()->set('cache.stores.slack.compress', true);
+    $cache = Cache::store('slack');
+    /** @var SlackStore $store */
+    $store = $cache->getStore();
+    $channel = $store->keyspace()->channels()[0];
+    $cache->flush();
+
+    $cache->put('smoke:emoji-ttl', 'short-lived', 300);
+    $cache->tags(['smoke'])->forever('smoke:emoji-forever', str_repeat('compressible ', 400));
+    $cache->lock('smoke:emoji-lock', 60)->get();
+
+    // Read the stored blocks back from Slack: it accepted and kept every emoji element.
+    $api = $store->keyspace()->api();
+    $history = $api->call('conversations.history', ['channel' => $channel->id, 'limit' => 20])['messages'];
+    $emoji = [];
+
+    foreach ($history as $message) {
+        $key = Codec::decode($message['text'] ?? '')[0] ?? null;
+
+        if ($key !== null) {
+            $section = $message['blocks'][0]['elements'][0]['elements'];
+            $emoji[$key] = array_values(array_map(fn ($e) => $e['name'], array_filter($section, fn ($e) => $e['type'] === 'emoji')));
+        }
+    }
+
+    expect($emoji)->toMatchArray([
+        'smoke:emoji-ttl' => ['hourglass_flowing_sand', 'closed_lock_with_key'],
+        'tag:smoke:key' => ['infinity', 'closed_lock_with_key'],
+        'smoke:emoji-lock' => ['lock', 'closed_lock_with_key'],
+    ]);
+
+    $forever = collect($emoji)->first(fn ($names, $key) => str_ends_with($key, ':smoke:emoji-forever'));
+    expect($forever)->toBe(['infinity', 'label', 'closed_lock_with_key', 'compression']);
+
+    $cache->flush();
+})->group('live');

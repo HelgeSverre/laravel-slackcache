@@ -23,6 +23,7 @@ class WriteToSlack implements ShouldQueue
 
     /**
      * @param  list<string>  $tags
+     * @param  list<string>  $emoji
      */
     public function __construct(
         public string $store,
@@ -33,6 +34,7 @@ class WriteToSlack implements ShouldQueue
         public array $tags,
         public int $seq,
         public string $replaces = '',
+        public array $emoji = [],
     ) {
         $this->key = base64_encode($key);
         $this->value = base64_encode($value);
@@ -52,6 +54,7 @@ class WriteToSlack implements ShouldQueue
                 $this->tags,
                 $this->seq,
                 $this->replaces,
+                $this->emoji,
             );
         }
     }

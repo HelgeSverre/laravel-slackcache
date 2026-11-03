@@ -23,11 +23,12 @@ final class Codec
 
     /**
      * @param  list<string>  $tags  Cache tags, shown in the preview.
+     * @param  list<string>  $emoji  Slack emoji names shown before the header, such as `lock`.
      * @return array{0: string, 1: list<array<string, mixed>>}
      *
      * @throws ValueTooLargeException
      */
-    public static function encode(string $key, string $value, ?int $expireAt = null, ?string $preview = null, array $tags = []): array
+    public static function encode(string $key, string $value, ?int $expireAt = null, ?string $preview = null, array $tags = [], array $emoji = []): array
     {
         $text = implode(' ', [
             self::MARKER,
@@ -41,6 +42,8 @@ final class Codec
         }
 
         $header = [
+            ...array_map(fn (string $name) => ['type' => 'emoji', 'name' => $name], $emoji),
+            ...($emoji === [] ? [] : [['type' => 'text', 'text' => ' ']]),
             ['type' => 'text', 'text' => 'SET ', 'style' => ['bold' => true]],
             ['type' => 'text', 'text' => self::show($key, 200), 'style' => ['code' => true]],
             ['type' => 'text', 'text' => self::expiryNote($expireAt).($tags === [] ? '' : ' · tags: '.implode(', ', $tags))],

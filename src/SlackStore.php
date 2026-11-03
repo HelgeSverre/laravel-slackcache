@@ -27,6 +27,9 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
      */
     protected array $tags = [];
 
+    /** Whether this instance writes lock keys, for the preview's emoji. */
+    protected bool $writesLocks = false;
+
     /** Marks a value compressed with zlib (raw DEFLATE). */
     public const string COMPRESSED = 'SC1Z:';
 
@@ -43,6 +46,7 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
         protected ?SlackStore $lockStore = null,
         protected ?Encrypter $encrypter = null,
         protected bool $compress = false,
+        protected bool $emoji = false,
     ) {
         $keyspace->previewUsing(fn (string $value) => $this->preview($this->unserialize($value)));
     }
@@ -83,7 +87,7 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
             return $this->forget($key);
         }
 
-        $this->keyspace->write($this->prefix.$key, $this->serialize($value), $this->expiresAt($seconds), $this->preview($value), $this->tags);
+        $this->keyspace->write($this->prefix.$key, $stored = $this->serialize($value), $this->expiresAt($seconds), $this->preview($value), $this->tags, $this->emojiFor(true, $stored));
 
         return true;
     }
@@ -100,7 +104,7 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
                 return false;
             }
 
-            $this->keyspace->write($key, $this->serialize($value), $seconds > 0 ? $this->expiresAt($seconds) : null, $this->preview($value), $this->tags);
+            $this->keyspace->write($key, $stored = $this->serialize($value), $seconds > 0 ? $this->expiresAt($seconds) : null, $this->preview($value), $this->tags, $this->emojiFor($seconds > 0, $stored));
 
             return true;
         });
@@ -122,7 +126,7 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
             $number = (int) $plain + (int) $value;
 
             // Like Redis INCR, keep the key's TTL.
-            $this->keyspace->write($key, $this->encode((string) $number), $current?->expireAt, $this->preview($number), $this->tags);
+            $this->keyspace->write($key, $stored = $this->encode((string) $number), $current?->expireAt, $this->preview($number), $this->tags, $this->emojiFor($current?->expireAt !== null, $stored));
 
             return $number;
         });
@@ -135,7 +139,7 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
 
     public function forever($key, $value): bool
     {
-        $this->keyspace->write($this->prefix.$key, $this->serialize($value), null, $this->preview($value), $this->tags);
+        $this->keyspace->write($this->prefix.$key, $stored = $this->serialize($value), null, $this->preview($value), $this->tags, $this->emojiFor(false, $stored));
 
         return true;
     }
@@ -151,7 +155,7 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
                 return false;
             }
 
-            $this->keyspace->write($key, $current->value, $this->expiresAt($seconds), $this->preview($this->unserialize($current->value)), $this->tags);
+            $this->keyspace->write($key, $current->value, $this->expiresAt($seconds), $this->preview($this->unserialize($current->value)), $this->tags, $this->emojiFor(true, $current->value));
 
             return true;
         });
@@ -184,7 +188,10 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
 
     public function lock($name, $seconds = 0, $owner = null): SlackLock
     {
-        return new SlackLock($this->lockStore ?? $this, $name, $seconds, $owner);
+        $writer = clone ($this->lockStore ?? $this);
+        $writer->writesLocks = true;
+
+        return new SlackLock($writer, $name, $seconds, $owner);
     }
 
     /**
@@ -225,6 +232,42 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
     public function keyspace(): Keyspace
     {
         return $this->keyspace;
+    }
+
+    /**
+     * Slack emoji names for the preview header, when `emoji` is on: what kind of key this is, at a glance.
+     *
+     * @return list<string>
+     */
+    protected function emojiFor(bool $expires, string $stored = ''): array
+    {
+        if (! $this->emoji) {
+            return [];
+        }
+
+        $emoji = [$this->writesLocks ? 'lock' : ($expires ? 'hourglass_flowing_sand' : 'infinity')];
+
+        if ($this->tags !== []) {
+            $emoji[] = 'label';
+        }
+
+        $plain = $stored;
+
+        if (str_starts_with($stored, self::ENCRYPTED)) {
+            $emoji[] = 'closed_lock_with_key';
+
+            try {
+                $plain = $this->encrypter?->decryptString(substr($stored, strlen(self::ENCRYPTED))) ?? '';
+            } catch (DecryptException) {
+                $plain = '';
+            }
+        }
+
+        if (str_starts_with($plain, self::COMPRESSED)) {
+            $emoji[] = 'compression';
+        }
+
+        return $emoji;
     }
 
     protected function expiresAt(int $seconds): int

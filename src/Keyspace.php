@@ -119,21 +119,22 @@ class Keyspace
      *
      * @param  string|null  $preview  What people see in Slack. Defaults to the stored bytes.
      * @param  list<string>  $tags  Cache tags, shown in the preview.
+     * @param  list<string>  $emoji  Slack emoji names for the preview header.
      */
-    public function write(string $key, string $value, ?int $expireAt, ?string $preview = null, array $tags = []): Entry
+    public function write(string $key, string $value, ?int $expireAt, ?string $preview = null, array $tags = [], array $emoji = []): Entry
     {
         if ($this->async) {
-            return $this->writeLater($key, $value, $expireAt, $preview, $tags);
+            return $this->writeLater($key, $value, $expireAt, $preview, $tags, $emoji);
         }
 
         $old = $this->get($key);
-        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
+        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags, $emoji);
 
         $shard = $this->shardFor($key);
 
         if ($this->history && $old !== null && $old->shard === $shard && ! $this->pastHalfLife($old)) {
             try {
-                return $this->edit($old, $text, $blocks, new Entry($key, $old->ts, $value, $expireAt, $shard), $tags);
+                return $this->edit($old, $text, $blocks, new Entry($key, $old->ts, $value, $expireAt, $shard), $tags, $emoji);
             } catch (SlackApiException $e) {
                 if ($e->error !== 'message_not_found') {
                     throw $e;
@@ -162,19 +163,21 @@ class Keyspace
      * Write-behind: remember the value as pending and queue the Slack write.
      *
      * @param  list<string>  $tags
+     * @param  list<string>  $emoji
      */
-    protected function writeLater(string $key, string $value, ?int $expireAt, ?string $preview, array $tags): Entry
+    protected function writeLater(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, array $emoji = []): Entry
     {
         $this->ensureLoaded();
 
         // Under the key's lock, so a job committing an older write cannot overwrite this pending one.
-        return $this->atomically($key, fn () => $this->queueWrite($key, $value, $expireAt, $preview, $tags));
+        return $this->atomically($key, fn () => $this->queueWrite($key, $value, $expireAt, $preview, $tags, $emoji));
     }
 
     /**
      * @param  list<string>  $tags
+     * @param  list<string>  $emoji
      */
-    protected function queueWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags): Entry
+    protected function queueWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, array $emoji = []): Entry
     {
         // The message this write will replace: the current entry's, or a deleted entry's not yet removed from Slack.
         $raw = $this->raw($key);
@@ -188,7 +191,7 @@ class Keyspace
         }
 
         $this->trackPending($key, true);
-        $this->queueJob(new Jobs\WriteToSlack($this->storeName, $key, $value, $expireAt, $preview, $tags, $seq, $replaces));
+        $this->queueJob(new Jobs\WriteToSlack($this->storeName, $key, $value, $expireAt, $preview, $tags, $seq, $replaces, $emoji));
 
         return $entry;
     }
@@ -227,8 +230,9 @@ class Keyspace
      * so a slow Slack does not hold up writers to the same key. What changed in between is reconciled after.
      *
      * @param  list<string>  $tags
+     * @param  list<string>  $emoji
      */
-    public function commitWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, int $seq, string $replaces = ''): void
+    public function commitWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, int $seq, string $replaces = '', array $emoji = []): void
     {
         $plan = $this->atomically($key, function () use ($key, $seq, $replaces) {
             if ($seq <= $this->flushedSeq()) {
@@ -262,7 +266,7 @@ class Keyspace
 
         $replaces = $plan;
         $shard = $this->shardFor($key);
-        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
+        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags, $emoji);
         $ts = $this->channels()[$shard]->post($text, $blocks);
 
         $this->atomically($key, function () use ($key, $value, $expireAt, $seq, $replaces, $shard, $ts) {
@@ -448,8 +452,9 @@ class Keyspace
      *
      * @param  list<array<string, mixed>>  $blocks
      * @param  list<string>  $tags
+     * @param  list<string>  $emoji
      */
-    protected function edit(Entry $old, string $text, array $blocks, Entry $entry, array $tags): Entry
+    protected function edit(Entry $old, string $text, array $blocks, Entry $entry, array $tags, array $emoji = []): Entry
     {
         $channel = $this->channels()[$old->shard];
 
@@ -458,7 +463,7 @@ class Keyspace
         } catch (TextMismatchException $e) {
             // Put the previous value back, so the message never holds a value Slack truncated.
             try {
-                [$oldText, $oldBlocks] = Codec::encode($old->key, $old->value, $old->expireAt, $this->previewOf($old->value), $tags);
+                [$oldText, $oldBlocks] = Codec::encode($old->key, $old->value, $old->expireAt, $this->previewOf($old->value), $tags, $emoji);
                 $channel->update($old->ts, $oldText, $oldBlocks);
             } catch (\Throwable) {
                 // The original error is the one worth reporting.

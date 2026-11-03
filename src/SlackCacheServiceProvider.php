@@ -141,9 +141,10 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             $keyspace,
             $prefix,
             $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
-            $lockChannel === null ? null : new SlackStore(self::keyspace($api, $replica, [$lockChannel], $config), $prefix),
+            $lockChannel === null ? null : new SlackStore(self::keyspace($api, $replica, [$lockChannel], $config), $prefix, emoji: (bool) ($config['emoji'] ?? false)),
             ($config['encrypt'] ?? false) ? $app->make(StringEncrypter::class) : null,
             self::compression($config),
+            (bool) ($config['emoji'] ?? false),
         );
     }
 
