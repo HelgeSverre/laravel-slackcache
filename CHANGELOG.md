@@ -2,7 +2,7 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
-## Unreleased
+## v0.1.0 - 2026-11-03
 
 - `slack` cache driver: one Slack message per key, read from a local replica, wire-compatible with the original Python SlackCache.
 - Full cache contract, including `add`, `touch` and atomic locks.
