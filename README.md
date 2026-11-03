@@ -136,6 +136,80 @@ Schedule::command('slackcache:reap --limit=20')->everyMinute();
 
 Each command takes `--store=` if your store is not called `slack`.
 
+## Works with the rest of Laravel
+
+The driver is an ordinary cache store, so the rest of Laravel's cache features work on top of it.
+
+### Stale-while-revalidate
+
+`Cache::flexible()` returns the stale value at once and refreshes it after the response is sent. Readers never wait for Slack, which is the idea.
+
+```php
+$report = Cache::store('slack')->flexible('report', [300, 3600], fn () => Report::build());
+```
+
+### Memoization
+
+`Cache::memo()` keeps values in memory for the rest of the request, so a second read does not even reach the replica:
+
+```php
+Cache::memo('slack')->get('settings'); // Replica
+Cache::memo('slack')->get('settings'); // Memory. Faster than 0.02 ms.
+```
+
+### Sessions
+
+The package registers a `slack` session driver. Every session is a Slack message:
+
+```dotenv
+SESSION_DRIVER=slack
+SESSION_STORE=slack   # The cache store to use; defaults to "slack"
+```
+
+Session payloads are serialized and base64-encoded, not encrypted, unless you set `SESSION_ENCRYPT=true`. Anyone in the channel can read them. Set it.
+
+### Rate limiting
+
+Laravel's rate limiter runs on `add` and `increment`, so it works here. Rate limiting, stored in a rate-limited API:
+
+```php
+// config/cache.php
+'limiter' => 'slack',
+```
+
+```php
+RateLimiter::attempt('send-invoice:'.$user->id, 3, fn () => $invoice->send());
+```
+
+### Cache commands
+
+`cache:clear` and `cache:forget` work as usual. `cache:clear` deletes every cache message in the channel, at Slack's pace:
+
+```bash
+php artisan cache:forget greeting slack
+php artisan cache:clear slack
+```
+
+### Failover
+
+Laravel's `failover` driver tries stores in order. Slack goes first, as befits a primary:
+
+```php
+'failover' => [
+    'driver' => 'failover',
+    'stores' => ['slack', 'file'],
+],
+```
+
+### php artisan about
+
+`php artisan about` gets a SlackCache section, read from config without calling Slack:
+
+```
+  SlackCache .................................................................
+  slack ................ #slackcache · replica: file · allkeys-slack · default
+```
+
 ## Sharding
 
 Slack's posting limit is per channel, so writes scale the way Redis Cluster does: more shards. `'shards' => 8` spreads keys over `#slackcache-1` … `#slackcache-8` using Redis Cluster's hash slots (CRC16 mod 16384), including `{hash tags}`:
