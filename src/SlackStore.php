@@ -33,7 +33,9 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
         protected string $prefix = '',
         protected array|bool|null $serializableClasses = null,
         protected ?SlackStore $lockStore = null,
-    ) {}
+    ) {
+        $keyspace->previewUsing(fn (string $value) => $this->preview($this->unserialize($value)));
+    }
 
     /**
      * Begin executing a new tags operation.

@@ -129,7 +129,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
         $lockChannel = isset($config['lock_channel']) ? ltrim((string) $config['lock_channel'], '#') : null;
 
         return new SlackStore(
-            self::keyspace($api, $replica, $channels, $config),
+            self::keyspace($api, $replica, $channels, $config, (bool) ($config['history'] ?? false)),
             $prefix,
             $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
             $lockChannel === null ? null : new SlackStore(self::keyspace($api, $replica, [$lockChannel], $config), $prefix),
@@ -140,7 +140,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
      * @param  list<string>  $channels
      * @param  array<string, mixed>  $config
      */
-    protected static function keyspace(SlackApi $api, \Illuminate\Contracts\Cache\Repository $replica, array $channels, array $config): Keyspace
+    protected static function keyspace(SlackApi $api, \Illuminate\Contracts\Cache\Repository $replica, array $channels, array $config, bool $history = false): Keyspace
     {
         return new Keyspace(
             $api,
@@ -152,6 +152,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             retentionDays: array_key_exists('retention_days', $config)
                 ? ($config['retention_days'] === null ? null : (int) $config['retention_days'])
                 : 90,
+            history: $history,
         );
     }
 

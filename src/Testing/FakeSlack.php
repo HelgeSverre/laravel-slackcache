@@ -21,7 +21,7 @@ use Illuminate\Support\Carbon;
  */
 class FakeSlack
 {
-    /** @var array<string, array{name: string, members: list<string>, messages: array<string, array<string, mixed>>}> */
+    /** @var array<string, array{name: string, members: list<string>, messages: array<string, array<string, mixed>>, replies?: array<string, array<string, array<string, mixed>>>}> */
     public array $channels = [];
 
     /** @var list<array{method: string, params: array<string, mixed>}> */
@@ -150,6 +150,20 @@ class FakeSlack
         return $messages;
     }
 
+    /**
+     * Thread replies under a message, oldest first, keyed by ts.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public function replies(string $channel, string $threadTs): array
+    {
+        $id = $this->channelId($channel);
+        $replies = $id === null ? [] : ($this->channels[$id]['replies'][$threadTs] ?? []);
+        uksort($replies, fn ($a, $b) => Entry::compareTs((string) $a, (string) $b));
+
+        return $replies;
+    }
+
     public function callCount(?string $method = null): int
     {
         return count(array_filter($this->calls, fn (array $call) => $method === null || $call['method'] === $method));
@@ -211,7 +225,9 @@ class FakeSlack
             'conversations.join' => $this->join($params),
             'chat.postMessage' => $this->post($params),
             'chat.delete' => $this->delete($params),
+            'chat.update' => $this->update($params),
             'conversations.history' => $this->history($params),
+            'conversations.replies' => $this->conversationReplies($params),
             default => $this->error('unknown_method'),
         };
     }
@@ -298,9 +314,55 @@ class FakeSlack
             'blocks' => isset($params['blocks']) ? json_decode((string) $params['blocks'], true) : null,
         ], fn ($value) => $value !== null);
 
+        if (isset($params['thread_ts'])) {
+            $threadTs = (string) $params['thread_ts'];
+
+            if (! isset($this->channels[$id]['messages'][$threadTs])) {
+                return $this->error('thread_not_found');
+            }
+
+            $message['thread_ts'] = $threadTs;
+            $this->channels[$id]['replies'][$threadTs][$ts] = $message;
+            $this->channels[$id]['messages'][$threadTs]['reply_count'] = count($this->channels[$id]['replies'][$threadTs]);
+
+            return $this->ok(['channel' => $id, 'ts' => $ts, 'message' => $message]);
+        }
+
         $this->channels[$id]['messages'][$ts] = $message;
 
         return $this->ok(['channel' => $id, 'ts' => $ts, 'message' => $message]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function update(array $params): PromiseInterface
+    {
+        $id = (string) ($params['channel'] ?? '');
+        $ts = (string) ($params['ts'] ?? '');
+
+        if (! isset($this->channels[$id]['messages'][$ts])) {
+            return $this->error('message_not_found');
+        }
+
+        $message = $this->channels[$id]['messages'][$ts];
+
+        if (($message['user'] ?? null) !== $this->userId) {
+            return $this->error('cant_update_message');
+        }
+
+        $text = (string) ($params['text'] ?? '');
+
+        if (isset($params['blocks']) && mb_strlen($text) > $this->textLimitWithBlocks) {
+            $text = mb_substr($text, 0, $this->textLimitWithBlocks);
+        }
+
+        $message['text'] = $text;
+        $message['blocks'] = isset($params['blocks']) ? json_decode((string) $params['blocks'], true) : null;
+        $message['edited'] = ['user' => $this->userId, 'ts' => $this->nextTs()];
+        $this->channels[$id]['messages'][$ts] = array_filter($message, fn ($value) => $value !== null);
+
+        return $this->ok(['channel' => $id, 'ts' => $ts, 'text' => $text, 'message' => $this->channels[$id]['messages'][$ts]]);
     }
 
     /**
@@ -311,8 +373,27 @@ class FakeSlack
         $id = (string) ($params['channel'] ?? '');
         $ts = (string) ($params['ts'] ?? '');
 
-        if (! isset($this->channels[$id]['messages'][$ts])) {
+        foreach ($this->channels[$id]['replies'] ?? [] as $threadTs => $replies) {
+            if (isset($replies[$ts])) {
+                unset($this->channels[$id]['replies'][$threadTs][$ts]);
+
+                // Like Slack: a deleted parent stays as a placeholder until its last reply is gone.
+                if ($this->channels[$id]['replies'][$threadTs] === [] && ($this->channels[$id]['messages'][$threadTs]['subtype'] ?? null) === 'tombstone') {
+                    unset($this->channels[$id]['messages'][$threadTs]);
+                }
+
+                return $this->ok(['channel' => $id, 'ts' => $ts]);
+            }
+        }
+
+        if (! isset($this->channels[$id]['messages'][$ts]) || ($this->channels[$id]['messages'][$ts]['subtype'] ?? null) === 'tombstone') {
             return $this->error('message_not_found');
+        }
+
+        if (! empty($this->channels[$id]['replies'][$ts])) {
+            $this->channels[$id]['messages'][$ts] = ['type' => 'message', 'subtype' => 'tombstone', 'ts' => $ts, 'text' => 'This message was deleted.', 'user' => 'USLACKBOT'];
+
+            return $this->ok(['channel' => $id, 'ts' => $ts]);
         }
 
         unset($this->channels[$id]['messages'][$ts]);
@@ -341,6 +422,25 @@ class FakeSlack
             'messages' => $page,
             'has_more' => $next !== '',
             'response_metadata' => ['next_cursor' => $next],
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function conversationReplies(array $params): PromiseInterface
+    {
+        $id = (string) ($params['channel'] ?? '');
+        $ts = (string) ($params['ts'] ?? '');
+
+        if (! isset($this->channels[$id]['messages'][$ts])) {
+            return $this->error('thread_not_found');
+        }
+
+        return $this->ok([
+            'messages' => [$this->channels[$id]['messages'][$ts], ...array_values($this->replies($id, $ts))],
+            'has_more' => false,
+            'response_metadata' => ['next_cursor' => ''],
         ]);
     }
 

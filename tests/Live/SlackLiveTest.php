@@ -107,3 +107,39 @@ it('tags, flushes tags and keeps locks in their own channel on a real workspace'
     $cache->flush();
     expect(iterator_to_array($store->keyspace()->channels()[0]->messages(), false))->toBeEmpty();
 })->group('live');
+
+it('keeps version history in threads on a real workspace', function () {
+    config()->set('cache.stores.slack.history', true);
+    $cache = Cache::store('slack');
+    /** @var SlackStore $store */
+    $store = $cache->getStore();
+    $channel = $store->keyspace()->channels()[0];
+    $cache->flush();
+
+    $cache->forever('smoke:config', ['theme' => 'light']);
+    $cache->forever('smoke:config', ['theme' => 'dark']);
+    $cache->forever('smoke:config', ['theme' => 'solarized']);
+
+    $messages = iterator_to_array($channel->messages(), false);
+    expect($messages)->toHaveCount(1);
+
+    // A cold replica reads the edited message.
+    Cache::store('replica')->flush();
+    app('cache')->forgetDriver('slack');
+    expect(Cache::store('slack')->get('smoke:config'))->toBe(['theme' => 'solarized']);
+
+    // Slack has the two previous values in the thread.
+    $api = (fn () => $this->api)->call($channel);
+    $replies = $api->call('conversations.replies', ['channel' => $channel->id, 'ts' => $messages[0][0]])['messages'];
+    $texts = array_column(array_slice($replies, 1), 'text');
+
+    expect($texts)->toHaveCount(2)
+        ->and($texts[0])->toContain('light')
+        ->and($texts[1])->toContain('dark');
+
+    Cache::store('slack')->flush();
+
+    // Deleting the key deleted its thread first, so Slack left no "This message was deleted." placeholder.
+    $history = $api->call('conversations.history', ['channel' => $channel->id, 'limit' => 50])['messages'];
+    expect(array_filter($history, fn (array $m) => ($m['subtype'] ?? null) === 'tombstone'))->toBeEmpty();
+})->group('live');

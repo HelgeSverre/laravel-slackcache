@@ -3,6 +3,7 @@
 namespace HelgeSverre\SlackCache;
 
 use Closure;
+use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
 use HelgeSverre\SlackCache\Slack\Channel;
 use HelgeSverre\SlackCache\Slack\ChannelResolver;
 use HelgeSverre\SlackCache\Slack\Owner;
@@ -25,6 +26,9 @@ class Keyspace
     /** @var list<Channel>|null */
     protected ?array $channels = null;
 
+    /** @var (Closure(string): string)|null */
+    protected ?Closure $previewer = null;
+
     protected readonly string $namespace;
 
     /**
@@ -38,8 +42,19 @@ class Keyspace
         protected array $channelNames,
         protected ?int $syncInterval = 30,
         protected ?int $retentionDays = 90,
+        protected bool $history = false,
     ) {
         $this->namespace = 'slackcache:'.substr(sha1(implode(',', $channelNames)), 0, 12);
+    }
+
+    /**
+     * Render stored bytes for people, for the history thread. Set by the store, which knows how values are serialized.
+     *
+     * @param  Closure(string): string  $previewer
+     */
+    public function previewUsing(Closure $previewer): void
+    {
+        $this->previewer = $previewer;
     }
 
     public function get(string $key): ?Entry
@@ -63,6 +78,11 @@ class Keyspace
         [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
 
         $shard = $this->shardFor($key);
+
+        if ($this->history && $old !== null && $old->shard === $shard) {
+            return $this->edit($old, $text, $blocks, new Entry($key, $old->ts, $value, $expireAt, $shard), $tags);
+        }
+
         $ts = $this->channels()[$shard]->post($text, $blocks);
         $entry = new Entry($key, $ts, $value, $expireAt, $shard);
 
@@ -71,10 +91,61 @@ class Keyspace
         }
 
         if ($old !== null) {
-            $this->channel($old->shard)?->delete($old->ts);
+            $this->deleteMessage($this->channel($old->shard), $old->ts);
         }
 
         return $entry;
+    }
+
+    /**
+     * With history on: edit the key's message in place, then post the previous value as a reply in its thread.
+     *
+     * @param  list<array<string, mixed>>  $blocks
+     * @param  list<string>  $tags
+     */
+    protected function edit(Entry $old, string $text, array $blocks, Entry $entry, array $tags): Entry
+    {
+        $channel = $this->channels()[$old->shard];
+
+        try {
+            $channel->update($old->ts, $text, $blocks);
+        } catch (SlackCacheException $e) {
+            // Put the previous value back, so the message never holds a value Slack truncated.
+            [$oldText, $oldBlocks] = Codec::encode($old->key, $old->value, $old->expireAt, $this->previewOf($old->value), $tags);
+            $channel->update($old->ts, $oldText, $oldBlocks);
+
+            throw $e;
+        }
+
+        foreach ($this->liveGenerations() as $generation) {
+            $this->remember($generation, $entry);
+        }
+
+        $channel->reply($old->ts, sprintf(
+            "Previous value, replaced %s UTC%s:\n```\n%s\n```",
+            Carbon::now('UTC')->format('Y-m-d H:i:s'),
+            $old->expireAt === null ? '' : ' (it would have expired '.Carbon::createFromTimestampMsUTC($old->expireAt)->format('Y-m-d H:i:s').' UTC)',
+            mb_strimwidth($this->previewOf($old->value), 0, Codec::PREVIEW, '…'),
+        ));
+
+        return $entry;
+    }
+
+    /**
+     * With history on, a key's message may have a thread: delete it too.
+     */
+    protected function deleteMessage(?Channel $channel, string $ts): void
+    {
+        if ($channel === null) {
+            return;
+        }
+
+        $this->history ? $channel->deleteThread($ts) : $channel->delete($ts);
+    }
+
+    protected function previewOf(string $value): string
+    {
+        return $this->previewer === null ? mb_scrub($value, 'UTF-8') : ($this->previewer)($value);
     }
 
     public function remove(string $key): bool
@@ -86,7 +157,7 @@ class Keyspace
         }
 
         // Delete the message first: if Slack refuses, the replica still knows where it is.
-        $this->channel($entry->shard)?->delete($entry->ts);
+        $this->deleteMessage($this->channel($entry->shard), $entry->ts);
 
         foreach ($this->liveGenerations() as $generation) {
             // A tombstone, so a reload already in progress does not resurrect the key from its snapshot.
@@ -166,7 +237,7 @@ class Keyspace
         $this->dropGeneration($previous);
 
         foreach ($stale as $entry) {
-            $this->channels()[$entry->shard]->delete($entry->ts);
+            $this->deleteMessage($this->channels()[$entry->shard], $entry->ts);
         }
 
         return $live;
@@ -191,7 +262,7 @@ class Keyspace
                 $record = Codec::decode($text);
 
                 if ($record !== null && ! (new Entry($record[0], $ts, $record[1], $record[2]))->isLive($now, $this->retentionMs())) {
-                    $channel->delete($ts);
+                    $this->deleteMessage($channel, $ts);
                     $reaped++;
                 }
             }
@@ -232,7 +303,7 @@ class Keyspace
                 $record = Codec::decode($text);
 
                 if ($record !== null && $matches($record[0])) {
-                    $channel->delete($ts);
+                    $this->deleteMessage($channel, $ts);
                     $deleted++;
 
                     foreach ($this->liveGenerations() as $generation) {
