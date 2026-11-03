@@ -1,0 +1,76 @@
+{
+    "name": "helgesverre/laravel-slackcache",
+    "description": "A Laravel cache store persisted to a Slack channel. One message per key. Eviction policy: the free plan.",
+    "keywords": [
+        "laravel",
+        "cache",
+        "slack",
+        "cache-driver",
+        "slackcache"
+    ],
+    "homepage": "https://github.com/HelgeSverre/laravel-slackcache",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Helge Sverre",
+            "email": "helge.sverre@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/cache": "^12.0||^13.0",
+        "illuminate/console": "^12.0||^13.0",
+        "illuminate/contracts": "^12.0||^13.0",
+        "illuminate/http": "^12.0||^13.0",
+        "illuminate/support": "^12.0||^13.0",
+        "spatie/laravel-package-tools": "^1.16"
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.0",
+        "laravel/pint": "^1.14",
+        "nunomaduro/collision": "^8.8",
+        "orchestra/testbench": "^11.0||^10.0",
+        "pestphp/pest": "^4.0",
+        "pestphp/pest-plugin-arch": "^4.0",
+        "pestphp/pest-plugin-laravel": "^4.0",
+        "phpstan/extension-installer": "^1.4",
+        "phpstan/phpstan-deprecation-rules": "^2.0",
+        "phpstan/phpstan-phpunit": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "HelgeSverre\\SlackCache\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "HelgeSverre\\SlackCache\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": "@composer run prepare",
+        "prepare": "@php vendor/bin/testbench package:discover --ansi",
+        "analyse": "vendor/bin/phpstan analyse",
+        "test": "vendor/bin/pest",
+        "test-coverage": "vendor/bin/pest --coverage",
+        "format": "vendor/bin/pint",
+        "lint": "vendor/bin/pint --test"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "phpstan/extension-installer": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "HelgeSverre\\SlackCache\\SlackCacheServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
