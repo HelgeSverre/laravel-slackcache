@@ -25,6 +25,9 @@ use Illuminate\Foundation\Console\AboutCommand;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Session\CacheBasedSessionHandler;
 use Illuminate\Session\SessionManager;
+use Laravel\Pulse\Livewire\Card;
+use Livewire\Livewire;
+use Livewire\LivewireManager;
 use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
 
@@ -34,6 +37,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
     {
         $package
             ->name('slackcache')
+            ->hasViews('slackcache')
             ->hasCommands([
                 DecorateCommand::class,
                 DoctorCommand::class,
@@ -48,6 +52,16 @@ class SlackCacheServiceProvider extends PackageServiceProvider
 
     public function packageBooted(): void
     {
+        // The Pulse card, when Pulse (and so Livewire) is installed: <livewire:slackcache />
+        if (class_exists(Card::class) && class_exists(Livewire::class)) {
+            // After every provider has booted, so Livewire is ready whichever order the providers came in.
+            $this->app->booted(function () {
+                if ($this->app->bound(LivewireManager::class)) {
+                    Livewire::component('slackcache', Pulse\SlackCacheCard::class);
+                }
+            });
+        }
+
         $this->callAfterResolving('session', function (SessionManager $session) {
             $session->extend('slack', function (Application $app) {
                 $config = $app->make(ConfigRepository::class);

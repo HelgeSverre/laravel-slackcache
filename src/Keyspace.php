@@ -1033,6 +1033,21 @@ class Keyspace
         return array_values($live);
     }
 
+    /**
+     * The replica's view of the keyspace, without calling Slack: whether it is fresh, its generation, and how
+     * many keys have a queued write or delete waiting for a queue worker.
+     *
+     * @return array{synced: bool, generation: int, pending: int}
+     */
+    public function status(): array
+    {
+        return [
+            'synced' => $this->replica->has($this->namespace.':synced'),
+            'generation' => $this->generation(),
+            'pending' => count((array) $this->replica->get($this->namespace.':pending', [])),
+        ];
+    }
+
     /** Slack's limit for a channel topic, in characters. */
     public const int TOPIC_LENGTH = 250;
 

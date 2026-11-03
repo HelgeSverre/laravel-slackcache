@@ -2,6 +2,16 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.11.0 - 2026-11-03
+
+### Added
+
+- `HelgeSverre\SlackCache\Health\SlackCacheCheck` for spatie/laravel-health: fails when the token or channels do not work, warns and fails on queued writes piling up, warns on slow responses. Thresholds are configurable.
+- Laravel Pulse support: `SlackCacheRecorder` records Slack calls, rate limits, retries, errors and reloads; `<livewire:slackcache />` shows them.
+- `SlackApiCalled` event for every Slack call, with its duration and error.
+- `Keyspace::status()`: whether the replica is fresh, its generation, and how many keys have queued writes.
+- Live test with a real queue worker in a separate process, over a database queue and a shared SQLite replica.
+
 ## v0.10.0 - 2026-11-03
 
 ### Added
@@ -26,7 +36,6 @@ All notable changes to `laravel-slackcache` will be documented in this file.
 - `FakeSlack` supports `conversations.info` and `conversations.setTopic`, and `topic()`.
 - `slackcache:doctor` warns when neither `channels:manage` nor `channels:write.topic` is granted.
 - Laravel Boost guidelines (`resources/boost/guidelines/core.blade.php`) and a `slackcache-development` skill.
-- Mutation testing in CI.
 - README: a failover recipe with `retries => 0` and a short timeout, and what failover does and does not do.
 
 ### Fixed

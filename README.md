@@ -602,6 +602,7 @@ Laravel's cache events (`CacheHit`, `KeyWritten`, …) fire as for any store. Th
 | `SlackRequestRetrying` | A server error or dropped connection; the driver backs off and retries | `method`, `reason`, `attempt`, `delay` |
 | `KeyspaceReloaded` | The replica was rebuilt from the channel | `channels`, `keys`, `milliseconds` |
 | `HistoryReplyFailed` | With `history` on, a value was stored but its thread reply failed | `key`, `exception` |
+| `SlackApiCalled` | Any Slack call finished, after retries. Uploads and downloads report as `files.upload` and `files.download` | `method`, `milliseconds`, `error` (null on success) |
 
 ```php
 Event::listen(SlackRateLimited::class, function (SlackRateLimited $event) {
@@ -610,6 +611,52 @@ Event::listen(SlackRateLimited::class, function (SlackRateLimited $event) {
 ```
 
 Retries after a timeout can post a message twice. The duplicate holds the same key, and the next reload keeps the newer message and deletes the other.
+
+## Health checks
+
+With [spatie/laravel-health](https://github.com/spatie/laravel-health) installed, register `SlackCacheCheck`:
+
+```php
+use HelgeSverre\SlackCache\Health\SlackCacheCheck;
+use Spatie\Health\Facades\Health;
+
+Health::checks([
+    SlackCacheCheck::new()
+        ->store('slack')
+        ->warnWhenPendingWritesAbove(100)
+        ->failWhenPendingWritesAbove(1000)
+        ->warnWhenSlowerThan(2000), // milliseconds
+]);
+```
+
+| Result | When |
+| --- | --- |
+| Failed | The store is not a slack store, Slack rejects the token, a channel cannot be resolved, or more queued writes than `failWhenPendingWritesAbove` |
+| Warning | More queued writes than `warnWhenPendingWritesAbove`, or Slack answered slower than `warnWhenSlowerThan` |
+| OK | Otherwise |
+
+Each run calls `auth.test` once. The result's meta holds the workspace, token type, channels, latency, pending writes and replica generation. Queued writes only pile up with [write-behind](#write-behind), and only when no worker is running, which is the thing this check is for. Unlike `slackcache:doctor`, it posts nothing.
+
+## Pulse
+
+With [Laravel Pulse](https://laravel.com/docs/pulse) installed, add the recorder to `config/pulse.php`:
+
+```php
+'recorders' => [
+    \HelgeSverre\SlackCache\Pulse\SlackCacheRecorder::class => [
+        'enabled' => env('PULSE_SLACKCACHE_ENABLED', true),
+    ],
+    // ...
+],
+```
+
+And the card to your dashboard (`php artisan vendor:publish --tag=pulse-dashboard`):
+
+```blade
+<livewire:slackcache cols="6" />
+```
+
+The card shows Slack API calls by method, with their count, average and slowest time, and totals for rate limits (and the seconds spent waiting them out), retries, errors and reloads. It is mostly a chart of how long `chat.postMessage` takes, which is the price of the joke.
 
 ## Sharding
 
@@ -707,6 +754,7 @@ The package ships [Laravel Boost](https://laravel.com/docs/boost) guidelines and
 composer test       # Pest, against FakeSlack
 composer analyse    # PHPStan, level 8
 composer lint       # Pint
+composer mutate     # Pest mutation testing
 ```
 
 The live smoke test runs the cache contract against a real workspace, then flushes the channel:
@@ -715,7 +763,13 @@ The live smoke test runs the cache contract against a real workspace, then flush
 SLACKCACHE_LIVE_TOKEN=xoxb-... composer test:live
 ```
 
-It posts to `#slackcache-smoke` (override with `SLACKCACHE_LIVE_CHANNEL`).
+It posts to `#slackcache-smoke` (override with `SLACKCACHE_LIVE_CHANNEL`). It includes a run with a real queue worker: `tests/Live/worker.php` works a database queue in a separate PHP process, sharing a SQLite replica with the test, the way an app server and a worker share Redis.
+
+Mutation testing needs a coverage driver (PCOV or Xdebug) and runs in CI on every push to `main`:
+
+```bash
+composer mutate
+```
 
 ## Changelog
 

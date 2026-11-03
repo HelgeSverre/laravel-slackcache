@@ -31,6 +31,7 @@
     "require-dev": {
         "larastan/larastan": "^3.0",
         "laravel/pint": "^1.14",
+        "laravel/pulse": "^1.8",
         "nunomaduro/collision": "^8.8",
         "orchestra/testbench": "^11.0||^10.8",
         "pestphp/pest": "^4.0",
@@ -38,7 +39,12 @@
         "pestphp/pest-plugin-laravel": "^4.0",
         "phpstan/extension-installer": "^1.4",
         "phpstan/phpstan-deprecation-rules": "^2.0",
-        "phpstan/phpstan-phpunit": "^2.0"
+        "phpstan/phpstan-phpunit": "^2.0",
+        "spatie/laravel-health": "^1.40"
+    },
+    "suggest": {
+        "spatie/laravel-health": "For SlackCacheCheck, a health check for the store (^1.40)",
+        "laravel/pulse": "For the SlackCache Pulse card and recorder (^1.8)"
     },
     "autoload": {
         "psr-4": {
@@ -61,7 +67,8 @@
         "test-coverage": "vendor/bin/pest --coverage",
         "format": "vendor/bin/pint",
         "lint": "vendor/bin/pint --test",
-        "test:live": "vendor/bin/pest tests/Live --group=live"
+        "test:live": "vendor/bin/pest tests/Live --group=live",
+        "mutate": "XDEBUG_MODE=coverage vendor/bin/pest --mutate --everything --covered-only"
     },
     "config": {
         "sort-packages": true,

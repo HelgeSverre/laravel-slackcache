@@ -3,6 +3,7 @@
 namespace HelgeSverre\SlackCache\Slack;
 
 use Closure;
+use HelgeSverre\SlackCache\Events\SlackApiCalled;
 use HelgeSverre\SlackCache\Events\SlackRateLimited;
 use HelgeSverre\SlackCache\Events\SlackRequestRetrying;
 use HelgeSverre\SlackCache\Exceptions\SlackApiException;
@@ -86,6 +87,42 @@ class SlackApi
      * @throws SlackApiException
      */
     public function call(string $method, array $params = []): array
+    {
+        return $this->timed($method, fn () => $this->send($method, $params));
+    }
+
+    /**
+     * Run a request and report it as a SlackApiCalled event, with its duration and outcome.
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $request
+     * @return T
+     */
+    protected function timed(string $method, Closure $request): mixed
+    {
+        $started = hrtime(true);
+
+        try {
+            $result = $request();
+        } catch (SlackApiException $e) {
+            $this->dispatch(new SlackApiCalled($method, intdiv(hrtime(true) - $started, 1_000_000), $e->error));
+
+            throw $e;
+        }
+
+        $this->dispatch(new SlackApiCalled($method, intdiv(hrtime(true) - $started, 1_000_000)));
+
+        return $result;
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     *
+     * @throws SlackApiException
+     */
+    protected function send(string $method, array $params): array
     {
         $form = [];
 
@@ -193,6 +230,16 @@ class SlackApi
      * @throws SlackApiException
      */
     protected function raw(string $label, Closure $send): string
+    {
+        return $this->timed($label, fn () => $this->sendRaw($label, $send));
+    }
+
+    /**
+     * @param  Closure(): Response  $send
+     *
+     * @throws SlackApiException
+     */
+    protected function sendRaw(string $label, Closure $send): string
     {
         $attempt = 0;
 

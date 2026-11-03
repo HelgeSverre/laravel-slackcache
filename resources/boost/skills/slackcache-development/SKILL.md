@@ -44,6 +44,12 @@ Schedule::command('slackcache:reap')->everyMinute();         // delete expired m
 Schedule::command('slackcache:topic')->everyTenMinutes();    // optional: key counts in the channel topic
 ```
 
+## Monitor
+
+- spatie/laravel-health: `Health::checks([SlackCacheCheck::new()->store('slack')])` (`HelgeSverre\SlackCache\Health\SlackCacheCheck`). Fails on a bad token or a backlog of queued writes.
+- Laravel Pulse: add `HelgeSverre\SlackCache\Pulse\SlackCacheRecorder::class => []` to `pulse.recorders` and `<livewire:slackcache cols="6" />` to the dashboard.
+- Events in `HelgeSverre\SlackCache\Events`: `SlackApiCalled`, `SlackRateLimited`, `SlackRequestRetrying`, `KeyspaceReloaded`, `HistoryReplyFailed`.
+
 ## Test code that uses the store
 
 `SlackCache::fake()` swaps Slack for an in-memory workspace and rebuilds every slack store with a fresh replica. Assertions read keys without the cache prefix and compare unserialized values:
