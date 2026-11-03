@@ -20,7 +20,8 @@ class KeysCommand extends Command
 
         $store = $this->slackStore();
         $prefix = $store->getPrefix();
-        $pattern = (string) ($this->argument('pattern') ?? '*');
+        $argument = $this->argument('pattern');
+        $pattern = is_string($argument) && $argument !== '' ? $argument : '*';
         $count = 0;
 
         foreach ($store->keyspace()->scan() as $entry) {

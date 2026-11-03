@@ -2,6 +2,12 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.4.1 - 2026-11-03
+
+### Fixed
+
+- `slackcache:keys` reads its pattern argument without a cast PHPStan rejects in CI.
+
 ## v0.4.0 - 2026-11-03
 
 ### Added
