@@ -148,7 +148,7 @@ Cache::store('slack')->tags(['people', 'artists'])->get('John');
 ```
 
 ```
-SET `laravel-cache-5e8e…:John` · expires 2026-11-03 14:12:00 UTC · tags: people, artists
+SET `laravel-cache-11f6ad8ec52a2984abaafd7c3b516503785c2072:John` · expires 2026-11-03 14:12:00 UTC · tags: people, artists
 ```
 
 Flushing tags works as in Laravel: every key stored under any of the flushed tags becomes unreachable at once. The driver also deletes the messages of keys stored under exactly the flushed tags:
@@ -167,7 +167,7 @@ Laravel 4.0 called them cache sections. Laravel 4.1 renamed them to tags. This s
 Cache::store('slack')->section('people')->put('John', $john, 600);
 ```
 
-`section('people')` is `tags(['people'])`. It is not on the `Cache` facade's default store, only on `Cache::store('slack')`.
+`section('people')` is `tags(['people'])`. When Slack is your default store, `Cache::section('people')` works too.
 
 ## Locks
 

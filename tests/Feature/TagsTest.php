@@ -76,3 +76,11 @@ it('remembers sections, the Laravel 4.0 name for tags', function () {
     expect($cache->section('people')->get('John'))->toBe('Doe')
         ->and($cache->tags(['people'])->get('John'))->toBe('Doe');
 });
+
+it('answers section() on the Cache facade when slack is the default store', function () {
+    config()->set('cache.default', 'slack');
+
+    Cache::section('people')->put('John', 'Doe', 600);
+
+    expect(Cache::tags(['people'])->get('John'))->toBe('Doe');
+});
