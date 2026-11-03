@@ -1,10 +1,12 @@
 <?php
 
 use HelgeSverre\SlackCache\Codec;
+use HelgeSverre\SlackCache\Exceptions\SlackApiException;
 use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
 use HelgeSverre\SlackCache\Jobs\DeleteFromSlack;
 use HelgeSverre\SlackCache\Jobs\WriteToSlack;
 use HelgeSverre\SlackCache\Testing\FakeSlack;
+use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Queue;
 
@@ -221,4 +223,99 @@ it('still deletes the message when a delete job runs very late', function () {
     runSlackJobs([1]);
 
     expect($this->slack->messages('slackcache'))->toBeEmpty();
+});
+
+it('refuses write-behind without a shared replica', function () {
+    config()->set('cache.stores.slack.replica', null);
+
+    Cache::store('slack');
+})->throws(SlackCacheException::class, 'replica');
+
+it('does not let a late retry of an older write revert a newer one after a reload', function () {
+    Queue::fake();
+    $cache = Cache::store('slack');
+    $cache->put('k', 'one', 3600);
+    $cache->put('k', 'two', 3600);
+
+    runSlackJobs([1]); // 'two' reaches Slack; 'one' is still waiting for a retry
+    $cache->getStore()->keyspace()->load();
+    runSlackJobs([0]); // the late retry of 'one'
+
+    expect(slackValues($this->slack))->toBe([serialize('two')])
+        ->and($cache->get('k'))->toBe('two');
+});
+
+it('keeps a write that lands while an older job is talking to Slack', function () {
+    Queue::fake();
+    $cache = Cache::store('slack');
+    $cache->put('k', 'one', 3600);
+
+    // While job 'one' posts to Slack, the app writes 'two'.
+    $this->slack->beforeNext('chat.postMessage', fn () => $cache->put('k', 'two', 3600));
+    runSlackJobs([0]);
+
+    expect($cache->get('k'))->toBe('two');
+
+    runSlackJobs([1]);
+
+    expect(slackValues($this->slack))->toBe([serialize('two')])
+        ->and($cache->get('k'))->toBe('two');
+});
+
+it('deletes the message of a write that lost the race to a forget', function () {
+    Queue::fake();
+    $cache = Cache::store('slack');
+    $cache->put('k', 'one', 3600);
+
+    $this->slack->beforeNext('chat.postMessage', fn () => $cache->forget('k'));
+    runSlackJobs([0]);
+    runSlackJobs([1]);
+
+    expect($this->slack->messages('slackcache'))->toBeEmpty()
+        ->and($cache->get('k'))->toBeNull();
+});
+
+it('does not double-post when a write job is retried after posting', function () {
+    Queue::fake();
+    $cache = Cache::store('slack');
+    $cache->put('k', 'one', 3600);
+    runSlackJobs([0]);
+    $cache->put('k', 'two', 3600);
+
+    $this->slack->beforeNext('chat.delete', fn () => $this->slack->fail('internal_error'));
+
+    expect(fn () => runSlackJobs([1]))->toThrow(SlackApiException::class);
+
+    runSlackJobs([1]); // the queue retries
+
+    expect(slackValues($this->slack))->toBe([serialize('two')]);
+});
+
+it('serves reads when the re-sync job cannot be queued', function () {
+    config()->set('cache.stores.slack.async', false);
+    config()->set('cache.stores.slack.sync', 'background');
+    Cache::store('slack')->put('k', 'v', 3600);
+    $this->travel(31)->seconds();
+
+    $this->mock(Dispatcher::class)
+        ->shouldReceive('dispatch')
+        ->andThrow(new RuntimeException('queue down'));
+
+    expect(Cache::store('slack')->get('k'))->toBe('v');
+});
+
+it('deletes the message of a write whose key was deleted and cleaned up while it posted', function () {
+    Queue::fake();
+    $cache = Cache::store('slack');
+    $cache->put('k', 'one', 3600);
+
+    // While job 'one' posts, the app forgets the key and the delete job runs to completion.
+    $this->slack->beforeNext('chat.postMessage', function () use ($cache) {
+        $cache->forget('k');
+        app()->call([Queue::pushed(DeleteFromSlack::class)->first(), 'handle']);
+    });
+    app()->call([Queue::pushed(WriteToSlack::class)->first(), 'handle']);
+
+    expect($this->slack->messages('slackcache'))->toBeEmpty()
+        ->and($cache->get('k'))->toBeNull();
 });

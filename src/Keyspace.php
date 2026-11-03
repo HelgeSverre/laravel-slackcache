@@ -198,6 +198,8 @@ class Keyspace
      */
     protected function removeLater(string $key): bool
     {
+        $this->ensureLoaded();
+
         return $this->atomically($key, fn () => $this->queueRemove($key));
     }
 
@@ -211,10 +213,7 @@ class Keyspace
 
         $seq = $this->nextSeq();
 
-        foreach ($this->liveGenerations() as $generation) {
-            $this->replica->put($this->entryKey($key, $generation), ['deleted', $entry->ts, $seq], $this->tombstoneTtl());
-        }
-
+        $this->putTombstone($key, $entry->ts, $seq);
         $this->trackPending($key, true);
         $this->queueJob(new Jobs\DeleteFromSlack($this->storeName, $key, $seq, $entry->ts));
 
@@ -224,37 +223,80 @@ class Keyspace
     /**
      * Run by WriteToSlack: post a queued write, unless something newer has happened to the key since.
      *
+     * The key's lock covers the replica bookkeeping before and after the post, never the Slack call itself,
+     * so a slow Slack does not hold up writers to the same key. What changed in between is reconciled after.
+     *
      * @param  list<string>  $tags
      */
     public function commitWrite(string $key, string $value, ?int $expireAt, ?string $preview, array $tags, int $seq, string $replaces = ''): void
     {
-        $this->atomically($key, function () use ($key, $value, $expireAt, $preview, $tags, $seq, $replaces) {
+        $plan = $this->atomically($key, function () use ($key, $seq, $replaces) {
             if ($seq <= $this->flushedSeq()) {
-                return; // Written before a flush.
+                return null; // Written before a flush.
             }
 
             $raw = $this->raw($key);
 
-            if ($raw instanceof Entry && $raw->seq > $seq) {
-                return; // A newer write is pending or committed; it carries its own value.
+            if ($raw instanceof Entry && ! $raw->pending && $raw->seq === $seq) {
+                // A retry of a job that already posted: only finish deleting the message it replaced.
+                if ($replaces !== '' && $replaces !== $raw->ts) {
+                    $this->deleteMessage($this->channel($raw->shard), $replaces);
+                }
+
+                $this->trackPending($key, false);
+
+                return null;
             }
 
-            if (is_array($raw) && $raw[2] > $seq) {
-                return; // Deleted after this write; the delete job removes the message.
+            if (($raw instanceof Entry && $raw->seq > $seq) || (is_array($raw) && $raw[2] > $seq)) {
+                return null; // A newer write or delete is in charge of the key.
             }
 
             // The replica's record is current. If it has expired, fall back to what was known when the job was queued.
-            $replaces = $raw instanceof Entry ? $raw->ts : (is_array($raw) ? $raw[1] : $replaces);
-            $shard = $this->shardFor($key);
-            [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
-            $ts = $this->channels()[$shard]->post($text, $blocks);
+            return $raw instanceof Entry ? $raw->ts : (is_array($raw) ? $raw[1] : $replaces);
+        });
 
-            foreach ($this->liveGenerations() as $generation) {
-                $this->remember($generation, new Entry($key, $ts, $value, $expireAt, $shard, $seq));
+        if ($plan === null) {
+            return;
+        }
+
+        $replaces = $plan;
+        $shard = $this->shardFor($key);
+        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview, $tags);
+        $ts = $this->channels()[$shard]->post($text, $blocks);
+
+        $this->atomically($key, function () use ($key, $value, $expireAt, $seq, $replaces, $shard, $ts) {
+            $raw = $this->raw($key);
+            $channel = $this->channel($shard);
+
+            if ($raw instanceof Entry && $raw->seq > $seq) {
+                if ($raw->pending) {
+                    // A newer write is queued. Hand it this message to replace, and delete the one before.
+                    $this->rememberEverywhere($raw->withTs($ts));
+                    $this->deleteMessage($channel, $replaces);
+                } else {
+                    $this->deleteMessage($channel, $ts); // A newer write already replaced the old message.
+                }
+
+                return;
             }
 
-            if ($replaces !== '' && $replaces !== $ts) {
-                $this->deleteMessage($this->channel($raw instanceof Entry ? $raw->shard : $shard), $replaces);
+            if (is_array($raw) && $raw[2] > $seq) {
+                if ($raw[3]) {
+                    $this->deleteMessage($channel, $ts); // The key was deleted while this write was posting.
+                } else {
+                    // A delete is queued. Point it at this message, and delete the one before.
+                    $this->putTombstone($key, $ts, $raw[2]);
+                    $this->deleteMessage($channel, $replaces);
+                }
+
+                return;
+            }
+
+            $this->rememberEverywhere(new Entry($key, $ts, $value, $expireAt, $shard, $seq));
+
+            if ($replaces !== $ts) {
+                $this->deleteMessage($channel, $replaces);
             }
 
             $this->trackPending($key, false);
@@ -266,33 +308,48 @@ class Keyspace
      */
     public function commitDelete(string $key, int $seq, string $ts = ''): void
     {
-        $this->atomically($key, function () use ($key, $seq, $ts) {
+        $target = $this->atomically($key, function () use ($key, $seq, $ts) {
             if ($seq <= $this->flushedSeq()) {
-                return;
+                return null;
             }
 
             $raw = $this->raw($key);
 
             // A newer write took over the message to replace; it deletes it when it posts.
             if (($raw instanceof Entry && $raw->seq > $seq) || (is_array($raw) && $raw[2] > $seq)) {
-                return;
+                return null;
             }
 
             // The tombstone knows the message. If it has expired, use what was known when the job was queued.
-            $ts = is_array($raw) && $raw[2] === $seq ? $raw[1] : $ts;
+            $target = is_array($raw) && $raw[2] === $seq ? $raw[1] : $ts;
 
-            if ($raw instanceof Entry && $raw->ts !== $ts) {
-                return; // The key was reloaded from a newer message; leave it.
+            if ($raw instanceof Entry && $raw->ts !== $target) {
+                return null; // The key was reloaded from a newer message; leave it.
             }
 
-            $this->deleteMessage($this->channel($this->shardFor($key)), $ts);
-
-            foreach ($this->liveGenerations() as $generation) {
-                $this->replica->put($this->entryKey($key, $generation), ['deleted', '', $seq], $this->tombstoneTtl());
-            }
-
+            $this->putTombstone($key, '', $seq, done: true);
             $this->trackPending($key, false);
+
+            return $target;
         });
+
+        if (is_string($target)) {
+            $this->deleteMessage($this->channel($this->shardFor($key)), $target);
+        }
+    }
+
+    protected function rememberEverywhere(Entry $entry): void
+    {
+        foreach ($this->liveGenerations() as $generation) {
+            $this->remember($generation, $entry);
+        }
+    }
+
+    protected function putTombstone(string $key, string $ts, int $seq, bool $done = false): void
+    {
+        foreach ($this->liveGenerations() as $generation) {
+            $this->replica->put($this->entryKey($key, $generation), ['deleted', $ts, $seq, $done], $this->tombstoneTtl());
+        }
     }
 
     /**
@@ -310,14 +367,14 @@ class Keyspace
     /**
      * The replica's record for a key in the current generation: an entry, a tombstone [deleted, ts, seq], or null.
      *
-     * @return Entry|array{0: string, 1: string, 2: int}|null
+     * @return Entry|array{0: string, 1: string, 2: int, 3: bool}|null A tombstone is [deleted, ts to delete, seq, done].
      */
     protected function raw(string $key, ?int $generation = null): Entry|array|null
     {
         $data = $this->replica->get($this->entryKey($key, $generation));
 
-        if (is_array($data) && count($data) === 3 && ($data[0] ?? null) === 'deleted') {
-            return ['deleted', (string) $data[1], (int) $data[2]];
+        if (is_array($data) && in_array(count($data), [3, 4], true) && ($data[0] ?? null) === 'deleted') {
+            return ['deleted', (string) $data[1], (int) $data[2], (bool) ($data[3] ?? false)];
         }
 
         return Entry::tryFrom($data);
@@ -341,9 +398,15 @@ class Keyspace
         });
     }
 
+    /**
+     * Wall-clock microseconds, strictly increasing within a process. Comparable across processes and servers,
+     * so the latest write wins by time, the way Slack's own timestamps decide between two messages.
+     */
     protected function nextSeq(): int
     {
-        return (int) $this->replica->increment($this->namespace.':seq');
+        static $last = 0;
+
+        return $last = max((int) (microtime(true) * 1_000_000), $last + 1);
     }
 
     protected function flushedSeq(): int
@@ -475,7 +538,7 @@ class Keyspace
 
         foreach ($this->liveGenerations() as $generation) {
             // A tombstone, so a reload already in progress does not resurrect the key from its snapshot.
-            $this->replica->put($this->entryKey($key, $generation), ['deleted', '', 0], $this->tombstoneTtl());
+            $this->replica->put($this->entryKey($key, $generation), ['deleted', '', 0, true], $this->tombstoneTtl());
         }
 
         return true;
@@ -549,8 +612,11 @@ class Keyspace
 
             if ($queued instanceof Entry && $queued->pending) {
                 $this->remember($generation, $queued);
-            } elseif (is_array($queued) && $queued[2] > 0) {
+            } elseif (is_array($queued) && $queued[2] > 0 && ! $queued[3]) {
                 $this->replica->put($this->entryKey($entry->key, $generation), $queued, $this->tombstoneTtl());
+            } elseif ($queued instanceof Entry && $queued->ts === $entry->ts) {
+                // The same message: keep the write's sequence number, so a late retry of an older write stays stale.
+                $this->remember($generation, new Entry($entry->key, $entry->ts, $entry->value, $entry->expireAt, $entry->shard, $queued->seq));
             } else {
                 $this->remember($generation, $entry);
             }
@@ -563,9 +629,9 @@ class Keyspace
             if (! $this->replica->has($this->entryKey($key, $generation))) {
                 $queued = $this->raw($key, $previous);
 
-                if ($queued instanceof Entry) {
+                if ($queued instanceof Entry && $queued->pending) {
                     $this->remember($generation, $queued);
-                } elseif (is_array($queued)) {
+                } elseif (is_array($queued) && ! $queued[3]) {
                     $this->replica->put($this->entryKey($key, $generation), $queued, $this->tombstoneTtl());
                 }
             }
@@ -619,7 +685,7 @@ class Keyspace
     public function flush(): int
     {
         // Queued writes from before the flush must not bring their keys back.
-        $this->replica->forever($this->namespace.':flushed-seq', (int) $this->replica->get($this->namespace.':seq', 0));
+        $this->replica->forever($this->namespace.':flushed-seq', $this->nextSeq());
 
         $deleted = $this->deleteWhere(fn () => true);
 
@@ -797,7 +863,12 @@ class Keyspace
         // Stale, not cold: keep serving the replica and let a queued job re-read the channel.
         if ($this->backgroundSync && $this->replica->has($this->namespace.':generation')) {
             if ($this->replica->add($this->namespace.':reload-queued', true, max(60, (int) $this->syncInterval))) {
-                $this->queueJob(new Jobs\ReloadKeyspace($this->storeName));
+                try {
+                    $this->queueJob(new Jobs\ReloadKeyspace($this->storeName));
+                } catch (\Throwable) {
+                    // The queue is down. Serve the replica; the next stale read tries again.
+                    $this->replica->forget($this->namespace.':reload-queued');
+                }
             }
 
             return;

@@ -202,7 +202,9 @@ Cache::store('slack')->put('greeting', 'Hello', 3600); // Milliseconds. Slack he
 Cache::store('slack')->get('greeting');                // 'Hello', from the replica
 ```
 
-Each write gets a sequence number. A queued job that finds the key has changed since, written again, forgotten or flushed, skips itself. So jobs that run late, twice or out of order never put an older value in Slack.
+Each write gets a sequence number from the clock. A queued job that finds the key has changed since, written again, forgotten or flushed, skips itself. So jobs that run late, twice or out of order never put an older value in Slack. Between servers, the later write by wall clock wins, the same rule Slack's timestamps apply.
+
+Queue workers must use the same replica as the app: it is where jobs find out what happened to a key since they were queued. Use `redis` or `database`, or `file` when the workers run on the same machine. The driver refuses `async` and `'sync' => 'background'` without a replica, and `slackcache:doctor` warns about replicas that cannot be shared.
 
 Trade-offs, all of which come with write-behind caches in general:
 
@@ -211,7 +213,8 @@ Trade-offs, all of which come with write-behind caches in general:
 - **Reloads.** A re-sync keeps queued writes and deletes, including keys Slack has not seen yet.
 - **Failed jobs** retry as your queue is configured. A job that gives up leaves the write in the replica only.
 - **Not with `history`.** History replies need each write to see the one before it; the driver refuses the combination.
-- **Flush and locks stay synchronous.** `flush()` deletes from Slack before it returns, and queued writes from before it are dropped.
+- **Flush stays synchronous.** `flush()` deletes from Slack before it returns, and queued writes from before it are dropped.
+- **Locks** are atomic through the replica either way. Without `lock_channel`, acquiring and releasing them is written behind like any key; with it, the lock channel is synchronous.
 
 On the `sync` queue driver jobs run straight away, so `async` behaves like the default.
 

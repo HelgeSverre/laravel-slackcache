@@ -10,6 +10,10 @@ All notable changes to `laravel-slackcache` will be documented in this file.
 - `async => true` (write-behind): writes and deletes update the replica at once and reach Slack through queued `WriteToSlack` and `DeleteFromSlack` jobs. Sequence numbers make stale, repeated or out-of-order jobs skip themselves, and a flush drops writes queued before it.
 - `queue_connection` and `queue` options for those jobs.
 - Queued writes and deletes stay in the replica for up to a day while their jobs wait, and re-syncs carry them over, including keys Slack has not seen yet.
+- Write order is decided by wall-clock sequence numbers, comparable across processes and servers. Re-syncs keep each key's sequence number, so a late retry of an older write stays stale.
+- Jobs hold the key's lock only around replica bookkeeping, not during Slack calls, and reconcile writes or deletes that landed while they posted. A retried job does not post twice.
+- `async` and `sync => 'background'` require a replica; `slackcache:doctor` warns when it cannot be shared with queue workers.
+- A background re-sync that cannot be queued no longer fails the read.
 
 ### Changed
 

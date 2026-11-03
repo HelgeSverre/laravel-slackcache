@@ -167,6 +167,10 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             return;
         }
 
+        if (($config['replica'] ?? null) === null) {
+            throw new SlackCacheException('The slack cache store\'s async and background sync options need a replica that queue workers share with the app, such as redis or database.');
+        }
+
         $keyspace->useQueue(
             fn (object $job) => $app->make(BusDispatcher::class)->dispatch($job),
             (string) ($config['store'] ?? 'slack'),

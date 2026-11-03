@@ -99,6 +99,14 @@ class DoctorCommand extends Command
                 : $this->warned('Replica', "[{$replica}] has no locks: add, increment and reloads are not atomic across processes");
         }
 
+        if (($config['async'] ?? false) || ($config['sync'] ?? 'inline') === 'background') {
+            $driver = is_string($replica) ? config("cache.stores.{$replica}.driver") : null;
+
+            in_array($driver, ['array', 'file', null], true)
+                ? $this->warned('Queue', "[{$driver}] replica: queue workers must share it with the app. Fine on one machine with file; not with array.")
+                : $this->passed('Queue', "jobs share the [{$replica}] replica with the app");
+        }
+
         if ($config['encrypt'] ?? false) {
             $this->check('Encryption', function () {
                 $encrypter = app(StringEncrypter::class);
