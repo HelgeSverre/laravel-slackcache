@@ -169,6 +169,36 @@ class Channel
         return $names;
     }
 
+    public function topic(): string
+    {
+        return (string) ($this->api->call('conversations.info', ['channel' => $this->id])['channel']['topic']['value'] ?? '');
+    }
+
+    /**
+     * Set the channel topic. Slack announces it with a "set the channel topic" message; that notice is
+     * deleted again unless `$keepNotice`, so the channel holds cache messages and nothing else.
+     */
+    public function setTopic(string $topic, bool $keepNotice = false): void
+    {
+        $this->api->call('conversations.setTopic', ['channel' => $this->id, 'topic' => $topic]);
+
+        if ($keepNotice) {
+            return;
+        }
+
+        try {
+            $recent = $this->api->call('conversations.history', ['channel' => $this->id, 'limit' => 5])['messages'] ?? [];
+
+            foreach ($recent as $message) {
+                if (($message['subtype'] ?? null) === 'channel_topic' && ($message['user'] ?? null) === $this->owner->userId) {
+                    $this->delete((string) $message['ts']);
+                }
+            }
+        } catch (SlackApiException) {
+            // The topic is set. A notice left behind is cosmetic.
+        }
+    }
+
     public function delete(string $ts): void
     {
         try {

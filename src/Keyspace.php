@@ -875,6 +875,79 @@ class Keyspace
         return array_values($live);
     }
 
+    /** Slack's limit for a channel topic, in characters. */
+    public const int TOPIC_LENGTH = 250;
+
+    /**
+     * Counts per channel, read from the channel history: live keys, keys that expire within `$soon` seconds,
+     * and keys without a TTL.
+     *
+     * @return list<array{channel: Channel, keys: int, expiring: int, forever: int}>
+     */
+    public function summary(int $soon = 3600): array
+    {
+        $now = $this->now();
+        $summary = array_map(fn (Channel $channel) => ['channel' => $channel, 'keys' => 0, 'expiring' => 0, 'forever' => 0], $this->channels());
+
+        foreach ($this->scan() as $entry) {
+            $row = &$summary[$entry->shard];
+            $row['keys']++;
+
+            if ($entry->expireAt === null) {
+                $row['forever']++;
+            } elseif ($entry->expireAt - $now <= $soon * 1000) {
+                $row['expiring']++;
+            }
+
+            unset($row);
+        }
+
+        return $summary;
+    }
+
+    /**
+     * Set each channel's topic to a summary of what it holds. A topic that has not changed is left alone, so
+     * running this often costs one conversations.info call per channel, plus the history scan.
+     *
+     * @param  (Closure(array{channel: Channel, keys: int, expiring: int, forever: int}, int, int): string)|null  $format  Receives the row, the shard number (1-based) and the shard count.
+     * @return int The number of topics changed.
+     */
+    public function updateTopics(?Closure $format = null, bool $keepNotice = false): int
+    {
+        $format ??= self::defaultTopic(...);
+        $summary = $this->summary();
+        $changed = 0;
+
+        foreach ($summary as $i => $row) {
+            $topic = mb_strimwidth($format($row, $i + 1, count($summary)), 0, self::TOPIC_LENGTH, '…');
+
+            if ($row['channel']->topic() === $topic) {
+                continue;
+            }
+
+            $row['channel']->setTopic($topic, $keepNotice);
+            $changed++;
+        }
+
+        return $changed;
+    }
+
+    /**
+     * @param  array{channel: Channel, keys: int, expiring: int, forever: int}  $row
+     */
+    public static function defaultTopic(array $row, int $shard, int $shards): string
+    {
+        $plural = fn (int $n, string $one, string $many) => number_format($n).' '.($n === 1 ? $one : $many);
+
+        return implode(' · ', array_filter([
+            $shards > 1 ? "Shard {$shard} of {$shards}" : null,
+            $plural($row['keys'], 'key', 'keys'),
+            $row['expiring'] > 0 ? $plural($row['expiring'], 'expires', 'expire').' within the hour' : null,
+            $row['forever'] > 0 ? $plural($row['forever'], 'never expires', 'never expire') : null,
+            'Cache storage. Please do not chat here; it is not that kind of channel.',
+        ]));
+    }
+
     /**
      * @return array<string, int|string|null>
      */

@@ -2,6 +2,23 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.9.0 - 2026-11-03
+
+### Added
+
+- `SlackCache::fake()`: swaps Slack for `FakeSlack` in your application's tests, rebuilding every slack store with a fresh in-process replica and a placeholder token.
+- `FakeSlack` assertions: `assertStored($key, $value|callback)`, `assertNotStored()`, `assertStoredCount()`, `assertNothingStored()` and `stored()`. Keys are read without the cache prefix; values are unserialized, decrypted and inflated through the store.
+- `slackcache:topic`: sets each channel's topic to its key count, keys expiring within the hour, and keys without a TTL. Unchanged topics are left alone; Slack's "set the channel topic" notice is deleted unless `--keep-notice`. `Keyspace::updateTopics()` takes a custom format.
+- `FakeSlack` supports `conversations.info` and `conversations.setTopic`, and `topic()`.
+- `slackcache:doctor` warns when neither `channels:manage` nor `channels:write.topic` is granted.
+- Laravel Boost guidelines (`resources/boost/guidelines/core.blade.php`) and a `slackcache-development` skill.
+- Mutation testing in CI.
+- README: a failover recipe with `retries => 0` and a short timeout, and what failover does and does not do.
+
+### Fixed
+
+- Installing `FakeSlack` twice in one test left the first fake answering: Laravel keeps the first matching HTTP stub. The stub is now registered once per HTTP factory and answers with the latest fake.
+
 ## v0.8.0 - 2026-11-03
 
 ### Added

@@ -43,6 +43,17 @@ it('only warns about channels:manage when the channel already exists', function 
         ->assertSuccessful();
 });
 
+it('warns that slackcache:topic needs channels:manage or channels:write.topic', function () {
+    $this->slack->createChannel('slackcache');
+    $this->slack->scopes = ['chat:write', 'channels:read', 'channels:history', 'channels:join'];
+
+    $this->artisan('slackcache:doctor')->expectsOutputToContain('slackcache:topic needs it or channels:manage')->assertSuccessful();
+
+    $this->slack->scopes[] = 'channels:write.topic';
+
+    $this->artisan('slackcache:doctor')->doesntExpectOutputToContain('slackcache:topic needs it')->assertSuccessful();
+});
+
 it('warns about a per-process replica', function () {
     config()->set('cache.stores.slack.replica', null);
 

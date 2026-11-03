@@ -9,6 +9,7 @@ use HelgeSverre\SlackCache\Commands\KeysCommand;
 use HelgeSverre\SlackCache\Commands\LoadCommand;
 use HelgeSverre\SlackCache\Commands\ManifestCommand;
 use HelgeSverre\SlackCache\Commands\ReapCommand;
+use HelgeSverre\SlackCache\Commands\TopicCommand;
 use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
 use HelgeSverre\SlackCache\Slack\ChannelResolver;
 use HelgeSverre\SlackCache\Slack\SlackApi;
@@ -41,6 +42,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
                 LoadCommand::class,
                 ManifestCommand::class,
                 ReapCommand::class,
+                TopicCommand::class,
             ]);
     }
 

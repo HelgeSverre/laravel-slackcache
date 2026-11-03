@@ -365,6 +365,15 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
         return $stored;
     }
 
+    /**
+     * Turn the bytes a message holds back into the cached value: decrypted, inflated and unserialized.
+     * Null for bytes this store cannot read (a rotated key, say).
+     */
+    public function unserializeStored(string $stored): mixed
+    {
+        return $this->unserialize($stored);
+    }
+
     protected function unserialize(string $value): mixed
     {
         $value = $this->decode($value);

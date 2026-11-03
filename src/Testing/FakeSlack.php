@@ -3,10 +3,14 @@
 namespace HelgeSverre\SlackCache\Testing;
 
 use GuzzleHttp\Promise\PromiseInterface;
+use HelgeSverre\SlackCache\Codec;
 use HelgeSverre\SlackCache\Entry;
+use HelgeSverre\SlackCache\SlackStore;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
+use PHPUnit\Framework\Assert;
 
 /**
  * An in-memory Slack workspace, served through Laravel's HTTP fake.
@@ -21,7 +25,7 @@ use Illuminate\Support\Carbon;
  */
 class FakeSlack
 {
-    /** @var array<string, array{name: string, members: list<string>, messages: array<string, array<string, mixed>>, replies?: array<string, array<string, array<string, mixed>>>}> */
+    /** @var array<string, array{name: string, members: list<string>, messages: array<string, array<string, mixed>>, replies?: array<string, array<string, array<string, mixed>>>, topic?: string}> */
     public array $channels = [];
 
     /** @var list<array{method: string, params: array<string, mixed>}> */
@@ -48,6 +52,9 @@ class FakeSlack
     /** @var list<string> */
     protected array $private = [];
 
+    /** The cache store the assertions read keys and values through: its prefix, serializer and encrypter. */
+    protected ?string $store = null;
+
     public function __construct(
         public string $botId = 'B0SLACKCACHE',
         public string $userId = 'U0SLACKCACHE',
@@ -56,13 +63,112 @@ class FakeSlack
         public int $historyPageSize = 200,
     ) {}
 
+    /** @var \WeakMap<Factory, \stdClass>|null The fake each HTTP factory answers with. */
+    protected static ?\WeakMap $installed = null;
+
+    /**
+     * Answer Slack API calls made through the HTTP factory with a new, empty workspace. Installing again
+     * replaces the previous fake: Laravel keeps the first matching stub, so the stub is registered once.
+     */
     public static function install(?Factory $http = null, mixed ...$options): self
     {
         $fake = new self(...$options);
         $http ??= app(Factory::class);
-        $http->fake(['slack.com/api/*' => fn (Request $request) => $fake->handle($request)]);
+        self::$installed ??= new \WeakMap;
+
+        if (isset(self::$installed[$http])) {
+            self::$installed[$http]->fake = $fake;
+
+            return $fake;
+        }
+
+        $holder = new \stdClass;
+        $holder->fake = $fake;
+        self::$installed[$http] = $holder;
+        $http->fake(['slack.com/api/*' => fn (Request $request) => $holder->fake->handle($request)]);
 
         return $fake;
+    }
+
+    /**
+     * Read keys and values through this cache store in the assertions: without its prefix, and unserialized.
+     */
+    public function forStore(string $store): self
+    {
+        $this->store = $store;
+
+        return $this;
+    }
+
+    /**
+     * The live keys in every channel, newest message per key, with their values.
+     * Keys are without the store's prefix; values are unserialized when a store is set (see forStore()).
+     *
+     * @return array<string, mixed>
+     */
+    public function stored(): array
+    {
+        $store = $this->store === null ? null : Cache::store($this->store)->getStore();
+        $prefix = $store instanceof SlackStore ? $store->getPrefix() : '';
+        $now = (int) Carbon::now()->getTimestampMs();
+        $found = [];
+
+        foreach (array_keys($this->channels) as $id) {
+            foreach ($this->messages($id) as $ts => $message) {
+                $record = isset($message['subtype']) ? null : Codec::decode((string) ($message['text'] ?? ''));
+
+                if ($record === null || ($record[2] !== null && $record[2] <= $now) || ! str_starts_with($record[0], $prefix)) {
+                    continue;
+                }
+
+                $key = substr($record[0], strlen($prefix));
+
+                if (! isset($found[$key]) || Entry::compareTs((string) $ts, $found[$key][0]) > 0) {
+                    $found[$key] = [(string) $ts, $record[1]];
+                }
+            }
+        }
+
+        ksort($found, SORT_STRING);
+
+        return array_map(fn (array $hit) => $store instanceof SlackStore ? $store->unserializeStored($hit[1]) : $hit[1], $found);
+    }
+
+    /**
+     * Assert that a key is stored in Slack and has not expired, optionally with a value, or a value that passes a callback.
+     */
+    public function assertStored(string $key, mixed $value = null): self
+    {
+        $stored = $this->stored();
+
+        Assert::assertArrayHasKey($key, $stored, "Key [{$key}] is not stored in Slack.");
+
+        if (func_num_args() > 1) {
+            $value instanceof \Closure
+                ? Assert::assertTrue((bool) $value($stored[$key]), "Key [{$key}] is stored with a value that fails the callback.")
+                : Assert::assertEquals($value, $stored[$key], "Key [{$key}] is stored with a different value.");
+        }
+
+        return $this;
+    }
+
+    public function assertNotStored(string $key): self
+    {
+        Assert::assertArrayNotHasKey($key, $this->stored(), "Key [{$key}] is stored in Slack.");
+
+        return $this;
+    }
+
+    public function assertStoredCount(int $count): self
+    {
+        Assert::assertCount($count, $this->stored(), sprintf('Expected %d keys in Slack, found %d.', $count, count($this->stored())));
+
+        return $this;
+    }
+
+    public function assertNothingStored(): self
+    {
+        return $this->assertStoredCount(0);
     }
 
     /**
@@ -272,6 +378,8 @@ class FakeSlack
             'reactions.remove' => $this->react($params, $this->userId, false),
             'conversations.history' => $this->history($params),
             'conversations.replies' => $this->conversationReplies($params),
+            'conversations.info' => $this->info($params),
+            'conversations.setTopic' => $this->setTopic($params),
             default => $this->error('unknown_method'),
         };
     }
@@ -507,6 +615,60 @@ class FakeSlack
         }
 
         return $this->ok([]);
+    }
+
+    /**
+     * The current topic of a channel.
+     */
+    public function topic(string $channel): string
+    {
+        $id = $this->channelId($channel);
+
+        return $id === null ? '' : ($this->channels[$id]['topic'] ?? '');
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function info(array $params): PromiseInterface
+    {
+        $id = (string) ($params['channel'] ?? '');
+
+        if (! isset($this->channels[$id])) {
+            return $this->error('channel_not_found');
+        }
+
+        return $this->ok(['channel' => [
+            'id' => $id,
+            'name' => $this->channels[$id]['name'],
+            'topic' => ['value' => $this->channels[$id]['topic'] ?? '', 'creator' => '', 'last_set' => 0],
+        ]]);
+    }
+
+    /**
+     * Like Slack: setting the topic posts a "set the channel topic" notice in the channel.
+     *
+     * @param  array<string, mixed>  $params
+     */
+    protected function setTopic(array $params): PromiseInterface
+    {
+        $id = (string) ($params['channel'] ?? '');
+
+        if (! isset($this->channels[$id])) {
+            return $this->error('channel_not_found');
+        }
+
+        $topic = (string) ($params['topic'] ?? '');
+
+        if (mb_strlen($topic) > 250) {
+            return $this->error('too_long');
+        }
+
+        $this->channels[$id]['topic'] = $topic;
+        $ts = $this->nextTs();
+        $this->channels[$id]['messages'][$ts] = ['type' => 'message', 'subtype' => 'channel_topic', 'ts' => $ts, 'user' => $this->userId, 'text' => 'set the channel topic: '.$topic, 'topic' => $topic];
+
+        return $this->ok(['channel' => ['id' => $id, 'topic' => ['value' => $topic]]]);
     }
 
     /**

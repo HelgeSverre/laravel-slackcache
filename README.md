@@ -137,6 +137,7 @@ php artisan slackcache:reap       # Delete the messages of expired keys (20 per 
 php artisan slackcache:info       # Channels and settings, in the style of Redis INFO
 php artisan slackcache:keys       # List live keys matching a pattern, like Redis KEYS
 php artisan slackcache:manifest   # Print the Slack app manifest
+php artisan slackcache:topic      # Set the channel topic to a count of what it holds
 ```
 
 Expired keys stop being returned straight away, but their messages stay in the channel until reaped. Schedule the reaper:
@@ -393,6 +394,29 @@ Notes:
 - The lock channel is decorated too.
 - Needs the `reactions:write` scope, which the manifest includes. `slackcache:doctor` checks for it when `reactions` is on.
 
+## Channel topic
+
+`slackcache:topic` sets each cache channel's topic to a count of what it holds, so anyone who wanders in knows what they are looking at:
+
+```
+3 keys · 1 expires within the hour · 1 never expires · Cache storage. Please do not chat here; it is not that kind of channel.
+```
+
+A sharded store gets one per channel, starting with `Shard 2 of 8`. Slack announces every topic change with a "set the channel topic" message. The command deletes that notice again, so the channel holds cache messages and nothing else; pass `--keep-notice` to leave it. A topic that has not changed is left alone, so the command can run often:
+
+```php
+// routes/console.php
+Schedule::command('slackcache:topic')->everyTenMinutes();
+```
+
+Each run reads the channel history, like `slackcache:keys`. It needs `channels:manage` (in the manifest) or `channels:write.topic`. For your own wording, call the keyspace directly:
+
+```php
+Cache::store('slack')->getStore()->keyspace()->updateTopics(
+    fn (array $row) => "{$row['keys']} keys. {$row['forever']} of them are forever. Nothing is forever.",
+);
+```
+
 ## Version history
 
 Set `'history' => true` and overwriting a key edits its message in place instead of replacing it. The previous value goes into the message's thread:
@@ -500,14 +524,34 @@ php artisan cache:clear slack
 
 ### Failover
 
-Laravel's `failover` driver tries stores in order. Slack goes first, as befits a primary:
+Laravel's `failover` driver tries stores in order and moves to the next one when a store throws. Slack goes first, as befits a primary:
 
 ```php
-'failover' => [
-    'driver' => 'failover',
-    'stores' => ['slack', 'file'],
+'stores' => [
+
+    'slack' => [
+        'driver' => 'slack',
+        'token' => env('SLACKCACHE_TOKEN'),
+        'replica' => 'file',
+        'retries' => 0,  // fail over now, instead of after 1 + 2 + 4 + 8 + 16 seconds of backoff
+        'timeout' => 5,
+    ],
+
+    'cache' => [
+        'driver' => 'failover',
+        'stores' => ['slack', 'database'],
+    ],
+
 ],
 ```
+
+```dotenv
+CACHE_STORE=cache
+```
+
+Reads come from the replica, so they keep working while Slack is down, until the next re-sync needs the channel. Writes throw at once and land in the next store. Laravel fires `Illuminate\Cache\Events\CacheFailedOver` the first time each store fails.
+
+The stores do not sync with each other. A value written to `database` during an outage stays there, and once Slack is back, reads return Slack's older copy of the key, if it has one. Keep TTLs short on keys that matter, or flush the fallback after an outage. Do not put the slack store's own replica in the failover list.
 
 ### php artisan about
 
@@ -574,12 +618,40 @@ References: [Slack free plan limits](https://slack.com/help/articles/29414264463
 
 ## Testing your application
 
-`FakeSlack` is an in-memory Slack workspace served through Laravel's HTTP fake. It implements the API methods the driver uses, including paginated history, rate limits and truncation:
+`SlackCache::fake()` swaps Slack for an in-memory workspace. Every store that uses the slack driver is rebuilt against it with a fresh in-process replica, so no test sees another test's keys, and a missing `SLACKCACHE_TOKEN` is filled in. Then assert on what was stored:
+
+```php
+use HelgeSverre\SlackCache\SlackCache;
+
+it('caches the weekly report', function () {
+    $slack = SlackCache::fake();
+
+    $this->get('/reports/weekly')->assertOk();
+
+    $slack->assertStored('reports:weekly');
+    $slack->assertStored('reports:weekly', fn (array $report) => $report['total'] > 0);
+    $slack->assertNotStored('reports:draft');
+    $slack->assertStoredCount(1);
+});
+```
+
+| Method | Asserts |
+| --- | --- |
+| `assertStored($key)` | The key has a message in Slack and has not expired |
+| `assertStored($key, $value)` | … and holds that value (`assertEquals`) |
+| `assertStored($key, fn ($value) => …)` | … and the callback returns true |
+| `assertNotStored($key)` | The key has no live message |
+| `assertStoredCount($n)` / `assertNothingStored()` | How many live keys Slack holds |
+| `stored()` | Returns every live key and its value, for your own assertions |
+
+Keys are without the cache prefix. Values are read back through the store: unserialized, and decrypted and inflated when `encrypt` or `compress` is on. Messages from people in the channel are ignored, as the driver ignores them.
+
+The fake is `HelgeSverre\SlackCache\Testing\FakeSlack`. It implements the API methods the driver uses, including paginated history, rate limits and truncation, and can misbehave on request:
 
 ```php
 use HelgeSverre\SlackCache\Testing\FakeSlack;
 
-$slack = FakeSlack::install();
+$slack = FakeSlack::install(); // The fake alone, without rebuilding stores
 
 Cache::store('slack')->put('hello', 'world', 60);
 
@@ -594,6 +666,10 @@ $slack->reactAs('U0HUMAN', 'slackcache', $ts, 'eyes'); // Someone else reacts
 $slack->replies('slackcache', $ts);         // A message's thread, with `history` on
 $slack->beforeNext('conversations.history', fn () => /* interleave another process */ null);
 ```
+
+## AI assistants
+
+The package ships [Laravel Boost](https://laravel.com/docs/boost) guidelines and a `slackcache-development` skill. `php artisan boost:install` picks them up, so your coding assistant knows to configure a replica, fake Slack in tests, and run `slackcache:doctor` before rewriting your cache layer.
 
 ## Development
 

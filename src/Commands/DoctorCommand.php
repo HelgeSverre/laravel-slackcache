@@ -71,6 +71,10 @@ class DoctorCommand extends Command
 
             if (! in_array('channels:manage', $scopes, true)) {
                 $this->warned('channels:manage', 'missing; fine while the channels exist, needed to create them');
+
+                if (! in_array('channels:write.topic', $scopes, true)) {
+                    $this->warned('channels:write.topic', 'missing; slackcache:topic needs it or channels:manage');
+                }
             }
         }
 
