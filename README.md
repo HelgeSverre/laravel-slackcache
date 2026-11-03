@@ -765,7 +765,7 @@ SLACKCACHE_LIVE_TOKEN=xoxb-... composer test:live
 
 It posts to `#slackcache-smoke` (override with `SLACKCACHE_LIVE_CHANNEL`). It includes a run with a real queue worker: `tests/Live/worker.php` works a database queue in a separate PHP process, sharing a SQLite replica with the test, the way an app server and a worker share Redis.
 
-Mutation testing needs a coverage driver (PCOV or Xdebug). CI runs it on every push to `main` and weekly, in four shards (the keyspace; the store and Slack client; commands, jobs and integrations; the codec and wiring), each with a minimum score just under its current one, so a change that weakens the tests fails the build. `src/Testing` is left out: it is the fake, not the driver.
+Mutation testing needs a coverage driver (PCOV or Xdebug). The `mutation` workflow runs it on demand (Actions tab, or `gh workflow run mutation.yml`), in four shards (the keyspace; the store and Slack client; commands, jobs and integrations; the codec and wiring), each with a minimum score just under its current one, so a change that weakens the tests fails the run. `src/Testing` is left out: it is the fake, not the driver.
 
 ```bash
 composer mutate

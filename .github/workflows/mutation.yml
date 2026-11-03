@@ -1,15 +1,8 @@
 name: mutation
 
+# Manual only: the full run takes about 17 minutes. Start it from the Actions tab or with
+# `gh workflow run mutation.yml`.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**.php'
-      - 'tests/**.php'
-      - 'composer.lock'
-      - '.github/workflows/mutation.yml'
-  schedule:
-    - cron: '0 4 * * 1'
   workflow_dispatch:
 
 concurrency:

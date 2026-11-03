@@ -11,7 +11,7 @@ All notable changes to `laravel-slackcache` will be documented in this file.
 - `SlackApiCalled` event for every Slack call, with its duration and error.
 - `Keyspace::status()`: whether the replica is fresh, its generation, and how many keys have queued writes.
 - Live test with a real queue worker in a separate process, over a database queue and a shared SQLite replica.
-- Mutation testing in CI (`composer mutate`), in four shards with minimum scores: keyspace 63%, store and Slack client 68%, commands, jobs and integrations 65%, codec and wiring 75%.
+- Mutation testing (`composer mutate`, and a manually run `mutation` workflow), in four shards with minimum scores: keyspace 63%, store and Slack client 68%, commands, jobs and integrations 65%, codec and wiring 75%.
 - Tests for exact retry counts per failure type, Redis hash tag edge cases, Slack timestamp ordering, token types and expiry at the exact deadline, found by mutation testing.
 
 ### Changed
