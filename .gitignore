@@ -30,4 +30,3 @@ phpstan.neon
 testbench.yaml
 
 /coverage
-/art/header.a*.png
