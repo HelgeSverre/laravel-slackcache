@@ -37,7 +37,7 @@ class SlackStore implements LockProvider, Store
             return $this->forget($key);
         }
 
-        $this->keyspace->write($this->prefix.$key, $this->serialize($value), $this->expiresAt($seconds));
+        $this->keyspace->write($this->prefix.$key, $this->serialize($value), $this->expiresAt($seconds), $this->preview($value));
 
         return true;
     }
@@ -54,7 +54,7 @@ class SlackStore implements LockProvider, Store
                 return false;
             }
 
-            $this->keyspace->write($key, $this->serialize($value), $seconds > 0 ? $this->expiresAt($seconds) : null);
+            $this->keyspace->write($key, $this->serialize($value), $seconds > 0 ? $this->expiresAt($seconds) : null, $this->preview($value));
 
             return true;
         });
@@ -87,7 +87,7 @@ class SlackStore implements LockProvider, Store
 
     public function forever($key, $value): bool
     {
-        $this->keyspace->write($this->prefix.$key, $this->serialize($value), null);
+        $this->keyspace->write($this->prefix.$key, $this->serialize($value), null, $this->preview($value));
 
         return true;
     }
@@ -103,7 +103,7 @@ class SlackStore implements LockProvider, Store
                 return false;
             }
 
-            $this->keyspace->write($key, $current->value, $this->expiresAt($seconds));
+            $this->keyspace->write($key, $current->value, $this->expiresAt($seconds), $this->preview($this->unserialize($current->value)));
 
             return true;
         });
@@ -152,6 +152,30 @@ class SlackStore implements LockProvider, Store
     protected function expiresAt(int $seconds): int
     {
         return (int) Carbon::now()->getTimestampMs() + $seconds * 1000;
+    }
+
+    /**
+     * A human-readable rendering of a value for the Slack preview. The message text keeps the exact serialized bytes.
+     */
+    protected function preview(mixed $value): string
+    {
+        if (is_string($value) || is_int($value) || is_float($value)) {
+            return (string) $value;
+        }
+
+        if (is_bool($value) || $value === null) {
+            return var_export($value, true);
+        }
+
+        if (is_array($value) || $value instanceof \JsonSerializable) {
+            $json = json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+            if ($json !== false) {
+                return $json;
+            }
+        }
+
+        return is_object($value) ? $value::class.' (serialized)' : get_debug_type($value);
     }
 
     protected function serialize(mixed $value): string

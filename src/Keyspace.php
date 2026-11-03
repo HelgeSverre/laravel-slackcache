@@ -54,10 +54,13 @@ class Keyspace
     /**
      * Post the key's new message, then delete its previous one. The channel holds one message per live key.
      */
-    public function write(string $key, string $value, ?int $expireAt): Entry
+    /**
+     * @param  string|null  $preview  What people see in Slack. Defaults to the stored bytes.
+     */
+    public function write(string $key, string $value, ?int $expireAt, ?string $preview = null): Entry
     {
         $old = $this->get($key);
-        [$text, $blocks] = Codec::encode($key, $value, $expireAt);
+        [$text, $blocks] = Codec::encode($key, $value, $expireAt, $preview);
 
         $shard = $this->shardFor($key);
         $ts = $this->channels()[$shard]->post($text, $blocks);

@@ -313,3 +313,16 @@ it('provides atomic locks', function () {
 
     expect(Cache::store('slack')->lock('deploy', 60)->get())->toBeTrue();
 });
+
+it('shows people a readable preview of the value', function (mixed $value, string $preview) {
+    Cache::store('slack')->forever('p', $value);
+
+    $blocks = $this->slack->latest('slackcache')['blocks'];
+
+    expect($blocks[0]['elements'][1]['elements'][0]['text'])->toBe($preview);
+})->with([
+    'string' => ['Hello from Laravel', 'Hello from Laravel'],
+    'array' => [['theme' => 'dark', 'regrets' => 0], "{\n    \"theme\": \"dark\",\n    \"regrets\": 0\n}"],
+    'bool' => [true, 'true'],
+    'object' => [new ArrayObject([1]), 'ArrayObject (serialized)'],
+]);

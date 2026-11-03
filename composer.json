@@ -55,7 +55,8 @@
         "test": "vendor/bin/pest",
         "test-coverage": "vendor/bin/pest --coverage",
         "format": "vendor/bin/pint",
-        "lint": "vendor/bin/pint --test"
+        "lint": "vendor/bin/pint --test",
+        "test:live": "vendor/bin/pest tests/Live --group=live"
     },
     "config": {
         "sort-packages": true,

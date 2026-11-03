@@ -65,6 +65,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             timeout: (int) ($config['timeout'] ?? 60),
             retries: (int) ($config['retries'] ?? 5),
             headers: (array) ($config['headers'] ?? []),
+            baseUrl: rtrim((string) ($config['base_url'] ?? SlackApi::BASE_URL), '/').'/',
         );
 
         $keyspace = new Keyspace(

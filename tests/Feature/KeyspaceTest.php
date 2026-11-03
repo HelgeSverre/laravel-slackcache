@@ -142,3 +142,12 @@ it('uses a per-process replica when none is configured', function () {
 
     expect(Cache::store('slack')->get('k'))->toBe('v');
 });
+
+it('calls a custom API base URL', function () {
+    config()->set('cache.stores.slack.base_url', 'https://proxy.example.test/slack/api');
+    Http::fake(['proxy.example.test/*' => fn ($request) => $this->slack->handle($request)]);
+
+    Cache::store('slack')->put('k', 'v', 600);
+
+    Http::assertSent(fn ($request) => $request->url() === 'https://proxy.example.test/slack/api/chat.postMessage');
+});

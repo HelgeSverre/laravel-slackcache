@@ -26,7 +26,7 @@ final class Codec
      *
      * @throws ValueTooLargeException
      */
-    public static function encode(string $key, string $value, ?int $expireAt = null): array
+    public static function encode(string $key, string $value, ?int $expireAt = null, ?string $preview = null): array
     {
         $text = implode(' ', [
             self::MARKER,
@@ -50,7 +50,7 @@ final class Codec
             'elements' => [
                 ['type' => 'rich_text_section', 'elements' => $header],
                 ['type' => 'rich_text_preformatted', 'elements' => [
-                    ['type' => 'text', 'text' => self::show($value, self::PREVIEW)],
+                    ['type' => 'text', 'text' => self::show($preview ?? $value, self::PREVIEW)],
                 ]],
             ],
         ]];

@@ -2,4 +2,4 @@
 
 use HelgeSverre\SlackCache\Tests\TestCase;
 
-uses(TestCase::class)->in('Feature', 'Unit');
+uses(TestCase::class)->in('Feature', 'Unit', 'Live');
