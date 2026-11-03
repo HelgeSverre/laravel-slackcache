@@ -51,6 +51,9 @@ class Keyspace
 
     protected readonly string $namespace;
 
+    /** @var array<string, true> Replica locks this process holds, so atomically() can nest. */
+    protected array $held = [];
+
     /**
      * @param  list<string>  $channelNames
      * @param  int|null  $syncInterval  Seconds before the replica re-reads the channel. Null: only on a cold replica.
@@ -646,12 +649,22 @@ class Keyspace
     public function atomically(string $key, Closure $callback): mixed
     {
         $store = $this->replica->getStore();
+        $name = $this->namespace.':lock:'.sha1($key);
 
-        if (! $store instanceof LockProvider) {
+        // Reentrant within a process: on the sync queue, a write job runs inside the write that queued it.
+        if (! $store instanceof LockProvider || isset($this->held[$name])) {
             return $callback();
         }
 
-        return $store->lock($this->namespace.':lock:'.sha1($key), 10)->block(10, $callback);
+        return $store->lock($name, 10)->block(10, function () use ($name, $callback) {
+            $this->held[$name] = true;
+
+            try {
+                return $callback();
+            } finally {
+                unset($this->held[$name]);
+            }
+        });
     }
 
     public function api(): SlackApi

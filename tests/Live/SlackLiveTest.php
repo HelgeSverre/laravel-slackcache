@@ -173,3 +173,30 @@ it('passes slackcache:doctor on a real workspace', function () {
         ->expectsOutputToContain('All checks passed')
         ->assertSuccessful();
 })->group('live');
+
+it('writes behind and re-syncs in the background on a real workspace (sync queue)', function () {
+    config()->set('queue.default', 'sync');
+    config()->set('cache.stores.slack.async', true);
+    config()->set('cache.stores.slack.sync', 'background');
+    config()->set('cache.stores.slack.sync_interval', 5);
+    $cache = Cache::store('slack');
+    /** @var SlackStore $store */
+    $store = $cache->getStore();
+    $channel = $store->keyspace()->channels()[0];
+    $cache->flush();
+
+    $cache->put('smoke:async', 'one', 120);
+    $cache->put('smoke:async', 'two', 120);
+    expect($cache->increment('smoke:async-hits', 5))->toBe(5);
+    $cache->forget('smoke:async-hits');
+
+    $texts = array_map(fn ($m) => Codec::decode($m[1]), iterator_to_array($channel->messages(), false));
+    expect($texts)->toHaveCount(1)
+        ->and($texts[0][0])->toBe('smoke:async')
+        ->and($texts[0][1])->toBe(serialize('two'));
+
+    $this->travel(6)->seconds();
+    expect(Cache::store('slack')->get('smoke:async'))->toBe('two');
+
+    $cache->flush();
+})->group('live');

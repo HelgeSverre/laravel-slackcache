@@ -165,8 +165,11 @@ it('behaves like a synchronous store on the sync queue', function () {
     $cache->put('k', 'one', 600);
     $cache->put('k', 'two', 600);
     $cache->forget('gone');
+    $cache->increment('hits'); // Holds the key's lock while the job runs inline.
+    $cache->add('once', 'yes', 600);
+    $cache->forget('hits');
 
-    expect(slackValues($this->slack))->toBe([serialize('two')])
+    expect(slackValues($this->slack))->toEqualCanonicalizing([serialize('two'), serialize('yes')])
         ->and($cache->get('k'))->toBe('two');
 });
 
