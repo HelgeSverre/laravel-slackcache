@@ -2,6 +2,21 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.5.0 - 2026-11-03
+
+### Added
+
+- `encrypt` option: values encrypted with Laravel's encrypter (`APP_KEY`). Previews and history replies show `(encrypted)`. Undecryptable values are cache misses.
+- `compress` option: values gzip-compressed when that makes them smaller, so larger values fit in one message. Applied before encryption.
+- `slackcache:doctor`: checks the token, scopes, channels, posting, history, replica, encryption and compression.
+- Retries for Slack server errors and dropped connections, with exponential backoff (1, 2, 4 … seconds, at most 30), within the existing `retries` limit.
+- Events: `SlackRateLimited`, `SlackRequestRetrying`, `KeyspaceReloaded`, `HistoryReplyFailed`.
+- `FakeSlack::serverError()` and `FakeSlack::disconnect()`. FakeSlack now sends `x-oauth-scopes` headers like Slack does.
+
+### Changed
+
+- A failed history reply dispatches `HistoryReplyFailed` instead of calling `report()`.
+
 ## v0.4.1 - 2026-11-03
 
 ### Fixed

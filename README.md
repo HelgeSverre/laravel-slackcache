@@ -86,7 +86,9 @@ SLACKCACHE_TOKEN=xoxb-...
 | `lock_channel` | none | Keep locks in a channel of their own, e.g. `slackcache-locks`. See [Locks](#locks). |
 | `prefix` | `cache.prefix` | Key prefix, as for other stores. |
 | `timeout` | `60` | HTTP timeout in seconds. A throttled write can take several. |
-| `retries` | `5` | How many HTTP 429s to wait out, using Slack's `Retry-After`. |
+| `retries` | `5` | How many times to retry a call. HTTP 429s wait for Slack's `Retry-After`; server errors and dropped connections back off 1, 2, 4 … seconds, at most 30. |
+| `encrypt` | `false` | Encrypt values with your `APP_KEY`. See [Encryption](#encryption). |
+| `compress` | `false` | Compress values before storing them. See [Compression](#compression). |
 | `headers` / `base_url` | none / `https://slack.com/api/` | For proxies and other unusual networks. |
 
 To make Slack your default cache, set `CACHE_STORE=slack`. Do not set the replica to the Slack store itself. The driver checks for this, because someone would.
@@ -123,6 +125,7 @@ Numbers are stored as plain text, like Laravel's Redis store. Everything else is
 ## Artisan commands
 
 ```bash
+php artisan slackcache:doctor     # Check the token, scopes, channels and settings
 php artisan slackcache:load       # Rebuild the replica from the channel history
 php artisan slackcache:reap       # Delete the messages of expired keys (20 per run, like Redis)
 php artisan slackcache:info       # Channels and settings, in the style of Redis INFO
@@ -138,6 +141,65 @@ Schedule::command('slackcache:reap --limit=20')->everyMinute();
 ```
 
 Each command takes `--store=` if your store is not called `slack`.
+
+### Doctor
+
+`slackcache:doctor` checks a store end to end and exits non-zero if anything fails, so it also works as a deploy check:
+
+```
+  Store ...................................... ✓ [slack] uses the slack driver
+  Token ............................... ✓ bot token · Acme · slackcache
+  Scopes ... ✓ chat:write, channels:read, channels:history, channels:join, channels:manage
+  Channels ........................................ ✓ #slackcache (C0123456789)
+  Post and delete #slackcache .................................. ✓ ok
+  History #slackcache ....................... ✓ 12 messages from this token
+  Replica ............................................ ✓ [redis], with locks
+
+   INFO  All checks passed.
+```
+
+It posts one message and deletes it again. It creates the channel if it does not exist, as the first write would. Scopes are checked for bot and user tokens; other token types report Slack's own scopes, which say nothing about this app.
+
+## Encryption
+
+Everyone in the channel can read the cache. To change that, set `'encrypt' => true`. Values are encrypted with Laravel's encrypter, so your `APP_KEY`, and `APP_PREVIOUS_KEYS` during a key rotation:
+
+```php
+'slack' => [
+    'driver' => 'slack',
+    // ...
+    'encrypt' => true,
+],
+```
+
+```
+SET `laravel-cache-api-token` · expires 2026-11-03 15:00:00 UTC
+(encrypted)
+```
+
+Notes:
+
+- Keys are not encrypted: they are how the driver finds values. Keep secrets out of key names.
+- Previews and history replies show `(encrypted)`.
+- A value that cannot be decrypted, after a key change say, is a cache miss.
+- Values written before you turned encryption on are still read. New writes are encrypted.
+- Encryption adds about a third to the stored size, plus around 200 characters. Combine it with compression to win that back.
+
+## Compression
+
+Set `'compress' => true` to gzip values before they are stored. JSON, HTML and other text usually shrink to a fraction of their size, so values well over the 11.9 KB message limit fit:
+
+```php
+Cache::store('slack')->put('report', $fortyKilobytesOfJson, 3600); // Fits, compressed
+```
+
+Notes:
+
+- A value is stored compressed only when that makes it smaller. Short and already-compressed values are stored as they are.
+- The preview still shows the readable value.
+- With `encrypt` on too, values are compressed first, then encrypted.
+- Compressed values carry a marker, so turning compression off later still reads them. The Python SlackCache server sees the raw compressed bytes.
+- Needs PHP's zlib extension, which almost every PHP build has.
 
 ## Cache tags
 
@@ -284,7 +346,7 @@ SESSION_DRIVER=slack
 SESSION_STORE=slack   # The cache store to use; defaults to "slack"
 ```
 
-Session payloads are serialized and base64-encoded, not encrypted, unless you set `SESSION_ENCRYPT=true`. Anyone in the channel can read them. Set it.
+Session payloads are readable by anyone in the channel unless they are encrypted. Set `SESSION_ENCRYPT=true`, or turn on [`encrypt`](#encryption) for the store.
 
 ### Rate limiting
 
@@ -328,6 +390,25 @@ Laravel's `failover` driver tries stores in order. Slack goes first, as befits a
   slack ................ #slackcache · replica: file · allkeys-slack · default
 ```
 
+## Events
+
+Laravel's cache events (`CacheHit`, `KeyWritten`, …) fire as for any store. The driver adds events for the Slack side, in `HelgeSverre\SlackCache\Events`:
+
+| Event | When | Properties |
+| --- | --- | --- |
+| `SlackRateLimited` | Slack answered HTTP 429; the driver waits and retries | `method`, `retryAfter`, `attempt` |
+| `SlackRequestRetrying` | A server error or dropped connection; the driver backs off and retries | `method`, `reason`, `attempt`, `delay` |
+| `KeyspaceReloaded` | The replica was rebuilt from the channel | `channels`, `keys`, `milliseconds` |
+| `HistoryReplyFailed` | With `history` on, a value was stored but its thread reply failed | `key`, `exception` |
+
+```php
+Event::listen(SlackRateLimited::class, function (SlackRateLimited $event) {
+    Log::warning("Slack throttled {$event->method} for {$event->retryAfter}s");
+});
+```
+
+Retries after a timeout can post a message twice. The duplicate holds the same key, and the next reload keeps the newer message and deletes the other.
+
 ## Sharding
 
 Slack's posting limit is per channel, so writes scale the way Redis Cluster does: more shards. `'shards' => 8` spreads keys over `#slackcache-1` … `#slackcache-8` using Redis Cluster's hash slots (CRC16 mod 16384), including `{hash tags}`:
@@ -352,7 +433,7 @@ Reads are about 50,000 times faster than writes. This is the correct way round f
 
 ## Limits
 
-- **Value size.** One key and value must fit in one Slack message: 16,000 characters of base64, about 11.9 KB of value. Larger values throw `ValueTooLargeException`. Consider a smaller value, or a database.
+- **Value size.** One key and value must fit in one Slack message: 16,000 characters of base64, about 11.9 KB of value. Larger values throw `ValueTooLargeException`. Turn on [compression](#compression), consider a smaller value, or a database.
 - **Write rate.** `chat.postMessage` allows about one message per second per channel, with short bursts. Use [shards](#sharding) for more.
 - **Reads of the channel.** History and deletes are Tier 3 (about 50 per minute). `flush()` on a large keyspace takes minutes. So does `slackcache:load`.
 - **Atomicity.** `add`, `increment` and locks are atomic across processes that share a replica supporting locks (`redis`, `database`, `file`). Reloads take the same lock, so one process re-reads the channel while the others wait.
@@ -379,6 +460,8 @@ expect($slack->latest('slackcache')['text'])->toStartWith('slackcache:v1');
 
 $slack->rateLimit(times: 2, retryAfter: 3); // The next two calls get HTTP 429
 $slack->fail('channel_not_found');          // The next call fails
+$slack->serverError(times: 2, status: 503); // The next two calls get HTTP 503
+$slack->disconnect();                       // The next call drops the connection
 $slack->replies('slackcache', $ts);         // A message's thread, with `history` on
 $slack->beforeNext('conversations.history', fn () => /* interleave another process */ null);
 ```
