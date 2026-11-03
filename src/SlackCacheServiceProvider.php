@@ -122,7 +122,25 @@ class SlackCacheServiceProvider extends PackageServiceProvider
         );
 
         $replica = self::replica($app, $config, $cache);
-        $keyspace = /** @param list<string> $channels */ fn (array $channels) => new Keyspace(
+
+        $prefix = (string) ($config['prefix'] ?? $app->make(ConfigRepository::class)->get('cache.prefix', ''));
+        $lockChannel = isset($config['lock_channel']) ? ltrim((string) $config['lock_channel'], '#') : null;
+
+        return new SlackStore(
+            self::keyspace($api, $replica, $channels, $config),
+            $prefix,
+            $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
+            $lockChannel === null ? null : new SlackStore(self::keyspace($api, $replica, [$lockChannel], $config), $prefix),
+        );
+    }
+
+    /**
+     * @param  list<string>  $channels
+     * @param  array<string, mixed>  $config
+     */
+    protected static function keyspace(SlackApi $api, \Illuminate\Contracts\Cache\Repository $replica, array $channels, array $config): Keyspace
+    {
+        return new Keyspace(
             $api,
             $replica,
             $channels,
@@ -132,16 +150,6 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             retentionDays: array_key_exists('retention_days', $config)
                 ? ($config['retention_days'] === null ? null : (int) $config['retention_days'])
                 : 90,
-        );
-
-        $prefix = (string) ($config['prefix'] ?? $app->make(ConfigRepository::class)->get('cache.prefix', ''));
-        $lockChannel = isset($config['lock_channel']) ? ltrim((string) $config['lock_channel'], '#') : null;
-
-        return new SlackStore(
-            $keyspace($channels),
-            $prefix,
-            $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
-            $lockChannel === null ? null : new SlackStore($keyspace([$lockChannel]), $prefix),
         );
     }
 
