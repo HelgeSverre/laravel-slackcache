@@ -2,7 +2,6 @@
 
 namespace HelgeSverre\SlackCache;
 
-use Illuminate\Cache\CacheLock;
 use Illuminate\Cache\RetrievesMultipleKeys;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Store;
@@ -134,12 +133,12 @@ class SlackStore implements LockProvider, Store
         $this->prefix = $prefix;
     }
 
-    public function lock($name, $seconds = 0, $owner = null): CacheLock
+    public function lock($name, $seconds = 0, $owner = null): SlackLock
     {
-        return new CacheLock($this, $name, $seconds, $owner);
+        return new SlackLock($this, $name, $seconds, $owner);
     }
 
-    public function restoreLock($name, $owner): CacheLock
+    public function restoreLock($name, $owner): SlackLock
     {
         return $this->lock($name, 0, $owner);
     }

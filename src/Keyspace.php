@@ -53,8 +53,7 @@ class Keyspace
 
     /**
      * Post the key's new message, then delete its previous one. The channel holds one message per live key.
-     */
-    /**
+     *
      * @param  string|null  $preview  What people see in Slack. Defaults to the stored bytes.
      */
     public function write(string $key, string $value, ?int $expireAt, ?string $preview = null): Entry
@@ -66,7 +65,9 @@ class Keyspace
         $ts = $this->channels()[$shard]->post($text, $blocks);
         $entry = new Entry($key, $ts, $value, $expireAt, $shard);
 
-        $this->remember($this->generation(), $entry);
+        foreach ($this->liveGenerations() as $generation) {
+            $this->remember($generation, $entry);
+        }
 
         if ($old !== null) {
             $this->channel($old->shard)?->delete($old->ts);
@@ -83,8 +84,13 @@ class Keyspace
             return false;
         }
 
-        $this->replica->forget($this->entryKey($key));
+        // Delete the message first: if Slack refuses, the replica still knows where it is.
         $this->channel($entry->shard)?->delete($entry->ts);
+
+        foreach ($this->liveGenerations() as $generation) {
+            // A tombstone, so a reload already in progress does not resurrect the key from its snapshot.
+            $this->replica->put($this->entryKey($key, $generation), 'deleted', $this->entryTtl(null) ?? 3600);
+        }
 
         return true;
     }
@@ -97,6 +103,17 @@ class Keyspace
      */
     public function load(): int
     {
+        return $this->exclusively('load', fn () => $this->reload());
+    }
+
+    protected function reload(): int
+    {
+        $previous = $this->generation();
+        $generation = $this->nextGeneration();
+
+        // From here on, writes and deletes also go to the generation being built.
+        $this->replica->put($this->namespace.':loading', $generation, 3600);
+
         /** @var array<string, Entry> $entries */
         $entries = [];
         $stale = [];
@@ -124,18 +141,28 @@ class Keyspace
             }
         }
 
-        $generation = $this->generation() + 1;
         $live = 0;
+        $index = [];
 
         foreach ($entries as $entry) {
-            if ($entry->isLive($now, $this->retentionMs())) {
+            if (! $entry->isLive($now, $this->retentionMs())) {
+                continue;
+            }
+
+            $index[] = sha1($entry->key);
+            $live++;
+
+            // A write or delete during the reload is newer than the snapshot: keep it.
+            if (! $this->replica->has($this->entryKey($entry->key, $generation))) {
                 $this->remember($generation, $entry);
-                $live++;
             }
         }
 
+        $this->replica->forever($this->namespace.':'.$generation.':index', $index);
         $this->replica->forever($this->namespace.':generation', $generation);
+        $this->replica->forget($this->namespace.':loading');
         $this->markSynced();
+        $this->dropGeneration($previous);
 
         foreach ($stale as $entry) {
             $this->channels()[$entry->shard]->delete($entry->ts);
@@ -188,8 +215,12 @@ class Keyspace
             }
         }
 
-        $this->replica->forever($this->namespace.':generation', $this->generation() + 1);
-        $this->markSynced();
+        $this->exclusively('load', function () {
+            $previous = $this->generation();
+            $this->replica->forever($this->namespace.':generation', $this->nextGeneration());
+            $this->markSynced();
+            $this->dropGeneration($previous);
+        });
 
         return $deleted;
     }
@@ -269,9 +300,86 @@ class Keyspace
 
     protected function ensureLoaded(): void
     {
-        if (! $this->replica->has($this->namespace.':synced')) {
-            $this->load();
+        if ($this->replica->has($this->namespace.':synced')) {
+            return;
         }
+
+        // One process reloads; the others wait for it, then find the replica fresh.
+        $this->exclusively('load', function () {
+            if (! $this->replica->has($this->namespace.':synced')) {
+                $this->reload();
+            }
+        });
+    }
+
+    /**
+     * @template T
+     *
+     * @param  Closure(): T  $callback
+     * @return T
+     */
+    protected function exclusively(string $name, Closure $callback): mixed
+    {
+        $store = $this->replica->getStore();
+
+        if (! $store instanceof LockProvider) {
+            return $callback();
+        }
+
+        // A reload reads the whole channel history at Slack's Tier 3 rate; give it time.
+        return $store->lock($this->namespace.':'.$name, 600)->block(600, $callback);
+    }
+
+    /**
+     * The generation readers use, plus the one a reload is building, if any.
+     *
+     * @return list<int>
+     */
+    protected function liveGenerations(): array
+    {
+        $current = $this->generation();
+        $loading = $this->replica->get($this->namespace.':loading');
+
+        return is_int($loading) && $loading !== $current ? [$current, $loading] : [$current];
+    }
+
+    protected function nextGeneration(): int
+    {
+        $next = $this->replica->increment($this->namespace.':generation-counter');
+
+        // Never reuse a number, even if the counter was evicted from the replica.
+        return max((int) $next, $this->generation() + 1);
+    }
+
+    /**
+     * Forget the entries a reload put in an old generation. Entries written later expire on their own (see entryTtl()).
+     */
+    protected function dropGeneration(int $generation): void
+    {
+        $index = $this->replica->pull($this->namespace.':'.$generation.':index');
+
+        foreach (is_array($index) ? $index : [] as $hash) {
+            if (is_string($hash)) {
+                $this->replica->forget($this->namespace.':'.$generation.':'.$hash);
+            }
+        }
+    }
+
+    /**
+     * How long the replica keeps an entry, in seconds. Never past the key's deadline, and, when the replica
+     * re-syncs, never much past the next re-sync, which rewrites every live entry. Null: forever.
+     */
+    protected function entryTtl(?int $deadline): ?int
+    {
+        $seconds = $deadline === null ? null : (int) ceil(($deadline - $this->now()) / 1000);
+
+        if ($this->syncInterval === null) {
+            return $seconds;
+        }
+
+        $cap = 2 * $this->syncInterval + 60;
+
+        return $seconds === null ? $cap : min($seconds, $cap);
     }
 
     protected function markSynced(): void
@@ -286,17 +394,11 @@ class Keyspace
     protected function remember(int $generation, Entry $entry): void
     {
         $key = $this->entryKey($entry->key, $generation);
-        $deadline = $entry->deadline($this->retentionMs());
+        $seconds = $this->entryTtl($entry->deadline($this->retentionMs()));
 
-        if ($deadline === null) {
+        if ($seconds === null) {
             $this->replica->forever($key, $entry->toArray());
-
-            return;
-        }
-
-        $seconds = (int) ceil(($deadline - $this->now()) / 1000);
-
-        if ($seconds > 0) {
+        } elseif ($seconds > 0) {
             $this->replica->put($key, $entry->toArray(), $seconds);
         }
     }

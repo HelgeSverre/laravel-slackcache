@@ -2,6 +2,8 @@
 
 namespace HelgeSverre\SlackCache\Slack;
 
+use HelgeSverre\SlackCache\Exceptions\SlackApiException;
+
 /**
  * Finds, creates and joins the cache channels, listing the workspace at most once.
  */
@@ -37,11 +39,25 @@ class ChannelResolver
                 $id = (string) $this->api->call('conversations.create', ['name' => $name])['channel']['id'];
             }
 
-            $this->api->call('conversations.join', ['channel' => $id]);
+            $this->join($id);
             $channels[] = ['id' => $id, 'name' => $name];
         }
 
         return ['owner' => $owner, 'channels' => $channels];
+    }
+
+    /**
+     * Join a channel. Private channels cannot be joined, only invited to; if the token can see one, it is in it.
+     */
+    protected function join(string $id): void
+    {
+        try {
+            $this->api->call('conversations.join', ['channel' => $id]);
+        } catch (SlackApiException $e) {
+            if ($e->error !== 'method_not_supported_for_channel_type') {
+                throw $e;
+            }
+        }
     }
 
     /**

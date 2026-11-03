@@ -7,6 +7,7 @@ use HelgeSverre\SlackCache\Commands\LoadCommand;
 use HelgeSverre\SlackCache\Commands\ManifestCommand;
 use HelgeSverre\SlackCache\Commands\ReapCommand;
 use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
+use HelgeSverre\SlackCache\Slack\ChannelResolver;
 use HelgeSverre\SlackCache\Slack\SlackApi;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\CacheManager;
@@ -55,6 +56,10 @@ class SlackCacheServiceProvider extends PackageServiceProvider
 
         $shards = max(1, (int) ($config['shards'] ?? 1));
         $channel = ltrim((string) ($config['channel'] ?? 'slackcache'), '#');
+        if ($shards > 1 && ChannelResolver::looksLikeId($channel)) {
+            throw new SlackCacheException('Sharding needs a channel name, not a channel ID: shards are named <channel>-1 … <channel>-N.');
+        }
+
         $channels = $shards === 1
             ? [$channel]
             : array_map(fn (int $i) => "{$channel}-{$i}", range(1, $shards));

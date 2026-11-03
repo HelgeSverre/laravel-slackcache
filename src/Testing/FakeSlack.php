@@ -36,6 +36,12 @@ class FakeSlack
     /** @var list<string> */
     protected array $failures = [];
 
+    /** @var array<string, list<callable(array<string, mixed>): void>> */
+    protected array $hooks = [];
+
+    /** @var list<string> */
+    protected array $private = [];
+
     public function __construct(
         public string $botId = 'B0SLACKCACHE',
         public string $userId = 'U0SLACKCACHE',
@@ -84,6 +90,28 @@ class FakeSlack
         $messages = $this->messages($channel);
 
         return $messages === [] ? null : reset($messages);
+    }
+
+    /**
+     * Run a callback once, the next time a method is called, before it is answered.
+     * Useful for interleaving another process's writes with a slow call.
+     *
+     * @param  callable(array<string, mixed>): void  $callback
+     */
+    public function beforeNext(string $method, callable $callback): self
+    {
+        $this->hooks[$method][] = $callback;
+
+        return $this;
+    }
+
+    public function createPrivateChannel(string $name): string
+    {
+        $id = 'G'.strtoupper(substr(sha1($name), 0, 10));
+        $this->channels[$id] ??= ['name' => $name, 'members' => [$this->userId], 'messages' => []];
+        $this->private[] = $id;
+
+        return $id;
     }
 
     public function createChannel(string $name): string
@@ -152,6 +180,11 @@ class FakeSlack
 
         if (! str_starts_with($request->header('Authorization')[0] ?? '', 'Bearer ')) {
             return $this->error('not_authed');
+        }
+
+        if (! empty($this->hooks[$method])) {
+            $hook = array_shift($this->hooks[$method]);
+            $hook($params);
         }
 
         if ($this->failures !== []) {
@@ -223,6 +256,10 @@ class FakeSlack
 
         if (! isset($this->channels[$id])) {
             return $this->error('channel_not_found');
+        }
+
+        if (in_array($id, $this->private, true)) {
+            return $this->error('method_not_supported_for_channel_type');
         }
 
         $this->channels[$id]['members'] = array_values(array_unique([...$this->channels[$id]['members'], $this->userId]));
