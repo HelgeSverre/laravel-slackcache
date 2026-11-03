@@ -246,6 +246,40 @@ class Keyspace
     }
 
     /**
+     * Every live key, read from the channel history rather than the replica. Sorted by key.
+     *
+     * @return list<Entry>
+     */
+    public function scan(): array
+    {
+        /** @var array<string, Entry> $entries */
+        $entries = [];
+        $now = $this->now();
+
+        foreach ($this->channels() as $shard => $channel) {
+            foreach ($channel->messages() as [$ts, $text]) {
+                $record = Codec::decode($text);
+
+                if ($record === null) {
+                    continue;
+                }
+
+                $entry = new Entry($record[0], $ts, $record[1], $record[2], $shard);
+                $current = $entries[$entry->key] ?? null;
+
+                if ($current === null || $entry->isNewerThan($current)) {
+                    $entries[$entry->key] = $entry;
+                }
+            }
+        }
+
+        $live = array_filter($entries, fn (Entry $entry) => $entry->isLive($now, $this->retentionMs()));
+        ksort($live, SORT_STRING);
+
+        return array_values($live);
+    }
+
+    /**
      * @return array<string, int|string|null>
      */
     public function info(): array

@@ -3,6 +3,7 @@
 namespace HelgeSverre\SlackCache;
 
 use HelgeSverre\SlackCache\Commands\InfoCommand;
+use HelgeSverre\SlackCache\Commands\KeysCommand;
 use HelgeSverre\SlackCache\Commands\LoadCommand;
 use HelgeSverre\SlackCache\Commands\ManifestCommand;
 use HelgeSverre\SlackCache\Commands\ReapCommand;
@@ -29,6 +30,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             ->name('slackcache')
             ->hasCommands([
                 InfoCommand::class,
+                KeysCommand::class,
                 LoadCommand::class,
                 ManifestCommand::class,
                 ReapCommand::class,
