@@ -78,7 +78,13 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
     {
         $entry = $this->keyspace->get($this->prefix.$key);
 
-        return $entry === null ? null : $this->unserialize($entry->value);
+        if ($entry === null) {
+            return null;
+        }
+
+        $this->keyspace->countHit($entry);
+
+        return $this->unserialize($entry->value);
     }
 
     public function put($key, $value, $seconds): bool

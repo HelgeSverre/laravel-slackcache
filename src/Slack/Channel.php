@@ -124,6 +124,51 @@ class Channel
         $this->delete($ts);
     }
 
+    /**
+     * Add a reaction. Adding one that is already there is not an error.
+     */
+    public function react(string $ts, string $name): void
+    {
+        try {
+            $this->api->call('reactions.add', ['channel' => $this->id, 'timestamp' => $ts, 'name' => $name]);
+        } catch (SlackApiException $e) {
+            if ($e->error !== 'already_reacted') {
+                throw $e;
+            }
+        }
+    }
+
+    /**
+     * Remove this owner's reaction. Removing one that is not there is not an error.
+     */
+    public function unreact(string $ts, string $name): void
+    {
+        try {
+            $this->api->call('reactions.remove', ['channel' => $this->id, 'timestamp' => $ts, 'name' => $name]);
+        } catch (SlackApiException $e) {
+            if (! in_array($e->error, ['no_reaction', 'message_not_found'], true)) {
+                throw $e;
+            }
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $message
+     * @return list<string>
+     */
+    protected function ownReactions(array $message): array
+    {
+        $names = [];
+
+        foreach ($message['reactions'] ?? [] as $reaction) {
+            if ($this->owner->userId !== null && in_array($this->owner->userId, $reaction['users'] ?? [], true)) {
+                $names[] = (string) $reaction['name'];
+            }
+        }
+
+        return $names;
+    }
+
     public function delete(string $ts): void
     {
         try {
@@ -136,9 +181,10 @@ class Channel
     }
 
     /**
-     * Yield [ts, text] for this owner's messages, newest first.
+     * Yield [ts, text, reactions] for this owner's messages, newest first. Reactions are the names of the
+     * reactions this owner added.
      *
-     * @return Generator<int, array{0: string, 1: string}>
+     * @return Generator<int, array{0: string, 1: string, 2: list<string>}>
      */
     public function messages(): Generator
     {
@@ -153,7 +199,7 @@ class Channel
 
             foreach ($result['messages'] ?? [] as $message) {
                 if (! isset($message['subtype']) && $this->owner->wrote($message)) {
-                    yield [(string) $message['ts'], (string) ($message['text'] ?? '')];
+                    yield [(string) $message['ts'], (string) ($message['text'] ?? ''), $this->ownReactions($message)];
                 }
             }
 

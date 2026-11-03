@@ -49,6 +49,12 @@ class Keyspace
     /** Re-sync a stale replica from a queued job instead of during the read. */
     protected bool $backgroundSync = false;
 
+    /** @var array{hot: int, expiring: int}|null Reaction thresholds, when reactions are on. */
+    protected ?array $reactions = null;
+
+    /** The reactions decorate() manages. Others, and other people's, are left alone. */
+    public const array REACTIONS = ['fire', 'hourglass', 'skull'];
+
     protected readonly string $namespace;
 
     /** How long the replica keeps a queued write or delete whose job has not run. */
@@ -98,6 +104,109 @@ class Keyspace
         $this->queue = $queue;
         $this->async = $async;
         $this->backgroundSync = $backgroundSync;
+    }
+
+    /**
+     * Turn reactions on: count reads, and let decorate() mark hot, expiring and expired keys.
+     */
+    public function useReactions(int $hot, int $expiring): void
+    {
+        $this->reactions = ['hot' => $hot, 'expiring' => $expiring];
+    }
+
+    public function reactionsEnabled(): bool
+    {
+        return $this->reactions !== null;
+    }
+
+    /**
+     * Count a read of a key's current message, for the hot reaction. Counts last a day.
+     */
+    public function countHit(Entry $entry): void
+    {
+        if ($this->reactions === null) {
+            return;
+        }
+
+        $key = $this->hitsKey($entry->key, $entry->ts);
+        $this->replica->add($key, 0, 86_400);
+        $this->replica->increment($key);
+    }
+
+    /**
+     * Add and remove this token's reactions so they match each key's state, within a budget of API calls.
+     *
+     * @return array{added: int, removed: int}
+     */
+    public function decorate(int $limit = 20): array
+    {
+        $result = ['added' => 0, 'removed' => 0];
+
+        if ($this->reactions === null) {
+            return $result;
+        }
+
+        $now = $this->now();
+
+        foreach ($this->channels() as $channel) {
+            foreach (iterator_to_array($channel->messages(), false) as [$ts, $text, $current]) {
+                $record = Codec::decode($text);
+
+                if ($record === null) {
+                    continue;
+                }
+
+                $wanted = $this->wantedReactions(new Entry($record[0], $ts, $record[1], $record[2]), $now);
+                $current = array_values(array_intersect($current, self::REACTIONS));
+
+                foreach (array_diff($wanted, $current) as $name) {
+                    if ($limit <= $result['added'] + $result['removed']) {
+                        return $result;
+                    }
+
+                    $channel->react($ts, $name);
+                    $result['added']++;
+                }
+
+                foreach (array_diff($current, $wanted) as $name) {
+                    if ($limit <= $result['added'] + $result['removed']) {
+                        return $result;
+                    }
+
+                    $channel->unreact($ts, $name);
+                    $result['removed']++;
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return list<string>
+     */
+    protected function wantedReactions(Entry $entry, int $now): array
+    {
+        if (! $entry->isLive($now, $this->retentionMs())) {
+            return ['skull'];
+        }
+
+        $wanted = [];
+
+        if ($entry->expireAt !== null && $entry->expireAt - $now <= ($this->reactions['expiring'] ?? 0) * 1000) {
+            $wanted[] = 'hourglass';
+        }
+
+        if ((int) $this->replica->get($this->hitsKey($entry->key, $entry->ts), 0) >= ($this->reactions['hot'] ?? PHP_INT_MAX)) {
+            $wanted[] = 'fire';
+        }
+
+        return $wanted;
+    }
+
+    protected function hitsKey(string $key, string $ts): string
+    {
+        return $this->namespace.':hits:'.sha1($key).':'.$ts;
     }
 
     public function isAsync(): bool

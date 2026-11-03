@@ -63,6 +63,10 @@ class DoctorCommand extends Command
                 ? $this->passed('Scopes', implode(', ', $scopes))
                 : $this->failed('Scopes', 'missing '.implode(', ', $missing));
 
+            if (($config['reactions'] ?? false) && ! in_array('reactions:write', $scopes, true)) {
+                $this->failed('reactions:write', 'missing; the reactions option needs it');
+            }
+
             if (! in_array('channels:manage', $scopes, true)) {
                 $this->warned('channels:manage', 'missing; fine while the channels exist, needed to create them');
             }

@@ -2,6 +2,7 @@
 
 namespace HelgeSverre\SlackCache;
 
+use HelgeSverre\SlackCache\Commands\DecorateCommand;
 use HelgeSverre\SlackCache\Commands\DoctorCommand;
 use HelgeSverre\SlackCache\Commands\InfoCommand;
 use HelgeSverre\SlackCache\Commands\KeysCommand;
@@ -33,6 +34,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
         $package
             ->name('slackcache')
             ->hasCommands([
+                DecorateCommand::class,
                 DoctorCommand::class,
                 InfoCommand::class,
                 KeysCommand::class,
@@ -136,12 +138,13 @@ class SlackCacheServiceProvider extends PackageServiceProvider
 
         $keyspace = self::keyspace($api, $replica, $channels, $config, (bool) ($config['history'] ?? false));
         self::configureQueue($app, $keyspace, $config);
+        self::configureReactions($keyspace, $config);
 
         return new SlackStore(
             $keyspace,
             $prefix,
             $config['serializable_classes'] ?? $app->make(ConfigRepository::class)->get('cache.serializable_classes'),
-            $lockChannel === null ? null : new SlackStore(self::keyspace($api, $replica, [$lockChannel], $config), $prefix, emoji: (bool) ($config['emoji'] ?? false)),
+            $lockChannel === null ? null : new SlackStore(self::configureReactions(self::keyspace($api, $replica, [$lockChannel], $config), $config), $prefix, emoji: (bool) ($config['emoji'] ?? false)),
             ($config['encrypt'] ?? false) ? $app->make(StringEncrypter::class) : null,
             self::compression($config),
             (bool) ($config['emoji'] ?? false),
@@ -180,6 +183,28 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             async: $async,
             backgroundSync: $sync === 'background',
         );
+    }
+
+    /**
+     * `reactions`: true for the defaults, or ['hot' => reads, 'expiring' => seconds].
+     *
+     * @param  array<string, mixed>  $config
+     */
+    protected static function configureReactions(Keyspace $keyspace, array $config): Keyspace
+    {
+        $reactions = $config['reactions'] ?? false;
+
+        if ($reactions === false || $reactions === null) {
+            return $keyspace;
+        }
+
+        $options = is_array($reactions) ? $reactions : [];
+        $keyspace->useReactions(
+            hot: max(1, (int) ($options['hot'] ?? 100)),
+            expiring: max(0, (int) ($options['expiring'] ?? 3600)),
+        );
+
+        return $keyspace;
     }
 
     /**

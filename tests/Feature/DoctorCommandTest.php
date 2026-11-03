@@ -68,3 +68,12 @@ it('skips the scope check for browser session tokens', function () {
         ->expectsOutputToContain('not checked for browser session tokens')
         ->assertSuccessful();
 });
+
+it('needs reactions:write when reactions are on', function () {
+    config()->set('cache.stores.slack.reactions', true);
+
+    $this->artisan('slackcache:doctor')->expectsOutputToContain('the reactions option needs it')->assertFailed();
+
+    $this->slack->scopes[] = 'reactions:write';
+    $this->artisan('slackcache:doctor')->expectsOutputToContain('All checks passed')->assertSuccessful();
+});

@@ -190,6 +190,14 @@ class FakeSlack
         return $replies;
     }
 
+    /**
+     * Add a reaction as someone else.
+     */
+    public function reactAs(string $user, string $channel, string $ts, string $name): void
+    {
+        $this->react(['channel' => $this->channelId($channel), 'timestamp' => $ts, 'name' => $name], $user, true);
+    }
+
     public function callCount(?string $method = null): int
     {
         return count(array_filter($this->calls, fn (array $call) => $method === null || $call['method'] === $method));
@@ -260,6 +268,8 @@ class FakeSlack
             'chat.postMessage' => $this->post($params),
             'chat.delete' => $this->delete($params),
             'chat.update' => $this->update($params),
+            'reactions.add' => $this->react($params, $this->userId, true),
+            'reactions.remove' => $this->react($params, $this->userId, false),
             'conversations.history' => $this->history($params),
             'conversations.replies' => $this->conversationReplies($params),
             default => $this->error('unknown_method'),
@@ -457,6 +467,46 @@ class FakeSlack
             'has_more' => $next !== '',
             'response_metadata' => ['next_cursor' => $next],
         ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function react(array $params, string $user, bool $add): PromiseInterface
+    {
+        $id = (string) ($params['channel'] ?? '');
+        $ts = (string) ($params['timestamp'] ?? '');
+        $name = (string) ($params['name'] ?? '');
+
+        if (! isset($this->channels[$id]['messages'][$ts])) {
+            return $this->error('message_not_found');
+        }
+
+        $reactions = $this->channels[$id]['messages'][$ts]['reactions'] ?? [];
+        $index = array_search($name, array_column($reactions, 'name'), true);
+        $users = $index === false ? [] : $reactions[$index]['users'];
+
+        if ($add === in_array($user, $users, true)) {
+            return $this->error($add ? 'already_reacted' : 'no_reaction');
+        }
+
+        $users = $add ? [...$users, $user] : array_values(array_diff($users, [$user]));
+
+        if ($index === false) {
+            $reactions[] = ['name' => $name, 'users' => $users, 'count' => count($users)];
+        } elseif ($users === []) {
+            array_splice($reactions, $index, 1);
+        } else {
+            $reactions[$index] = ['name' => $name, 'users' => $users, 'count' => count($users)];
+        }
+
+        $this->channels[$id]['messages'][$ts]['reactions'] = $reactions;
+
+        if ($reactions === []) {
+            unset($this->channels[$id]['messages'][$ts]['reactions']);
+        }
+
+        return $this->ok([]);
     }
 
     /**

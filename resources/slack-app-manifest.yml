@@ -17,6 +17,7 @@ oauth_config:
       - channels:history
       - channels:join
       - channels:manage
+      - reactions:write # Only for the reactions option
 settings:
   org_deploy_enabled: false
   socket_mode_enabled: false
