@@ -66,3 +66,16 @@ it('clears locks with cache:clear --locks', function () {
 
     expect($this->slack->messages('slackcache-locks'))->toBeEmpty();
 })->skip(fn () => version_compare(app()->version(), '13.0', '<'), 'cache:clear --locks needs Laravel 13');
+
+it('reaps expired locks in the lock channel', function () {
+    config()->set('cache.stores.slack.lock_channel', 'slackcache-locks');
+    Cache::store('slack')->lock('crashed-worker', 10)->get();
+    $this->travel(11)->seconds();
+    Cache::store('slack')->lock('crashed-worker', 10)->get();
+
+    expect($this->slack->messages('slackcache-locks'))->toHaveCount(2);
+
+    $this->artisan('slackcache:reap')->expectsOutputToContain('Reaped 1 expired key')->assertSuccessful();
+
+    expect($this->slack->messages('slackcache-locks'))->toHaveCount(1);
+});

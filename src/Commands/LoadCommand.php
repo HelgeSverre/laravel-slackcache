@@ -15,7 +15,9 @@ class LoadCommand extends Command
     public function handle(): int
     {
         $started = microtime(true);
-        $keys = $this->slackStore()->keyspace()->load();
+        $store = $this->slackStore();
+        $keys = $store->keyspace()->load();
+        $store->lockStore()?->keyspace()->load();
 
         $this->components->info(sprintf('Loaded %d %s from Slack in %.2f s.', $keys, $keys === 1 ? 'key' : 'keys', microtime(true) - $started));
 

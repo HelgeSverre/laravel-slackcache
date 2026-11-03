@@ -201,6 +201,8 @@ php artisan cache:clear slack --locks   # Laravel 13
 
 Without `lock_channel`, `flushLocks()` throws, as Laravel's own stores do when locks share the cache.
 
+A lock that is never released (a crashed worker, say) expires, but its message stays. `slackcache:reap` reaps the lock channel too, after the cache channel, within the same `--limit`.
+
 ## Version history
 
 Set `'history' => true` and overwriting a key edits its message in place instead of replacing it. The previous value goes into the message's thread:
@@ -226,7 +228,9 @@ Every write, increment and `touch` adds a reply. The channel still holds one mes
 
 Notes:
 
-- With history on, a write is `chat.update` plus a thread reply, so it takes about twice as long. If Slack stores different text than was sent, the driver puts the previous value back and throws.
+- With history on, a write is `chat.update` plus a thread reply, so it takes about twice as long. If Slack stores different text than was sent, the driver puts the previous value back and throws. If the reply fails, the write still counts; the error goes to your exception handler.
+- Slack hides messages by creation time, and an edit keeps the creation time. So once a key's message is past half of `retention_days` (45 days on the free plan), the next write posts a fresh message and the thread starts over. Rewritten keys outlive the free plan; their history does not.
+- If another server deleted the key's message since your last sync, the write posts a new one.
 - Deleting a key deletes its thread first. Slack would otherwise keep a "This message was deleted." placeholder for the thread. That is one extra history read per delete.
 - An edit does not change a message's Slack timestamp. If two servers with separate replicas write the same key, the message created later wins, not the one edited later.
 - Turning history off later leaves existing threads in place. Deleting those keys then leaves Slack's placeholder. Flush with history on first if this matters to you.

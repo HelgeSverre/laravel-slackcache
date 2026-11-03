@@ -4,7 +4,7 @@ namespace HelgeSverre\SlackCache\Slack;
 
 use Generator;
 use HelgeSverre\SlackCache\Exceptions\SlackApiException;
-use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
+use HelgeSverre\SlackCache\Exceptions\TextMismatchException;
 
 /**
  * A channel that stores one message per key, written by this token's bot (or user).
@@ -38,7 +38,7 @@ class Channel
         if (($result['message']['text'] ?? null) !== $text) {
             $this->delete($ts);
 
-            throw new SlackCacheException('chat.postMessage stored different text than was sent; the write was rolled back.');
+            throw new TextMismatchException('chat.postMessage stored different text than was sent; the write was rolled back.');
         }
 
         return $ts;
@@ -59,7 +59,7 @@ class Channel
         ]);
 
         if (($result['message']['text'] ?? $result['text'] ?? null) !== $text) {
-            throw new SlackCacheException('chat.update stored different text than was sent.');
+            throw new TextMismatchException('chat.update stored different text than was sent.');
         }
     }
 

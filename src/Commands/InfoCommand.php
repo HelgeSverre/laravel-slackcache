@@ -16,9 +16,14 @@ class InfoCommand extends Command
     {
         $this->components->twoColumnDetail('<fg=green;options=bold>slackcache</>');
 
-        foreach ($this->slackStore()->keyspace()->info() as $key => $value) {
+        $store = $this->slackStore();
+
+        foreach ($store->keyspace()->info() as $key => $value) {
             $this->components->twoColumnDetail($key, $value === null ? 'null' : (string) $value);
         }
+
+        $locks = $store->lockStore()?->keyspace()->info()['slack_channels'] ?? null;
+        $this->components->twoColumnDetail('lock_channel', $locks === null ? 'shared' : (string) $locks);
 
         return self::SUCCESS;
     }

@@ -16,7 +16,14 @@ class ReapCommand extends Command
 
     public function handle(): int
     {
-        $reaped = $this->slackStore()->keyspace()->reap(max(1, (int) $this->option('limit')));
+        $store = $this->slackStore();
+        $limit = max(1, (int) $this->option('limit'));
+        $reaped = $store->keyspace()->reap($limit);
+
+        // Expired locks that were never released, in the lock channel.
+        if ($store->lockStore() !== null && $reaped < $limit) {
+            $reaped += $store->lockStore()->keyspace()->reap($limit - $reaped);
+        }
 
         $this->components->info(sprintf('Reaped %d expired %s.', $reaped, $reaped === 1 ? 'key' : 'keys'));
 

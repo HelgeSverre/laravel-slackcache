@@ -202,6 +202,14 @@ class SlackStore extends TaggableStore implements CanFlushLocks, LockProvider
         return $this->lock($name, 0, $owner);
     }
 
+    /**
+     * The store that holds locks when `lock_channel` is set.
+     */
+    public function lockStore(): ?SlackStore
+    {
+        return $this->lockStore;
+    }
+
     public function keyspace(): Keyspace
     {
         return $this->keyspace;

@@ -3,7 +3,8 @@
 namespace HelgeSverre\SlackCache;
 
 use Closure;
-use HelgeSverre\SlackCache\Exceptions\SlackCacheException;
+use HelgeSverre\SlackCache\Exceptions\SlackApiException;
+use HelgeSverre\SlackCache\Exceptions\TextMismatchException;
 use HelgeSverre\SlackCache\Slack\Channel;
 use HelgeSverre\SlackCache\Slack\ChannelResolver;
 use HelgeSverre\SlackCache\Slack\Owner;
@@ -79,8 +80,17 @@ class Keyspace
 
         $shard = $this->shardFor($key);
 
-        if ($this->history && $old !== null && $old->shard === $shard) {
-            return $this->edit($old, $text, $blocks, new Entry($key, $old->ts, $value, $expireAt, $shard), $tags);
+        if ($this->history && $old !== null && $old->shard === $shard && ! $this->pastHalfLife($old)) {
+            try {
+                return $this->edit($old, $text, $blocks, new Entry($key, $old->ts, $value, $expireAt, $shard), $tags);
+            } catch (SlackApiException $e) {
+                if ($e->error !== 'message_not_found') {
+                    throw $e;
+                }
+
+                // Another server deleted the message since this replica last synced. Write a new one.
+                $old = null;
+            }
         }
 
         $ts = $this->channels()[$shard]->post($text, $blocks);
@@ -109,10 +119,14 @@ class Keyspace
 
         try {
             $channel->update($old->ts, $text, $blocks);
-        } catch (SlackCacheException $e) {
+        } catch (TextMismatchException $e) {
             // Put the previous value back, so the message never holds a value Slack truncated.
-            [$oldText, $oldBlocks] = Codec::encode($old->key, $old->value, $old->expireAt, $this->previewOf($old->value), $tags);
-            $channel->update($old->ts, $oldText, $oldBlocks);
+            try {
+                [$oldText, $oldBlocks] = Codec::encode($old->key, $old->value, $old->expireAt, $this->previewOf($old->value), $tags);
+                $channel->update($old->ts, $oldText, $oldBlocks);
+            } catch (\Throwable) {
+                // The original error is the one worth reporting.
+            }
 
             throw $e;
         }
@@ -121,12 +135,19 @@ class Keyspace
             $this->remember($generation, $entry);
         }
 
-        $channel->reply($old->ts, sprintf(
-            "Previous value, replaced %s UTC%s:\n```\n%s\n```",
-            Carbon::now('UTC')->format('Y-m-d H:i:s'),
-            $old->expireAt === null ? '' : ' (it would have expired '.Carbon::createFromTimestampMsUTC($old->expireAt)->format('Y-m-d H:i:s').' UTC)',
-            mb_strimwidth($this->previewOf($old->value), 0, Codec::PREVIEW, '…'),
-        ));
+        try {
+            $channel->reply($old->ts, sprintf(
+                "Previous value, replaced %s UTC%s:\n```\n%s\n```",
+                Carbon::now('UTC')->format('Y-m-d H:i:s'),
+                $old->expireAt === null ? '' : ' (it would have expired '.Carbon::createFromTimestampMsUTC($old->expireAt)->format('Y-m-d H:i:s').' UTC)',
+                mb_strimwidth($this->previewOf($old->value), 0, Codec::PREVIEW, '…'),
+            ));
+        } catch (\Throwable $e) {
+            // The new value is stored. A missing history reply is not worth failing the write over.
+            if (function_exists('report')) {
+                report($e);
+            }
+        }
 
         return $entry;
     }
@@ -141,6 +162,17 @@ class Keyspace
         }
 
         $this->history ? $channel->deleteThread($ts) : $channel->delete($ts);
+    }
+
+    /**
+     * Whether a message is past half of Slack's retention period. Editing keeps a message's timestamp, and
+     * Slack hides messages by creation time, so history mode reposts such keys instead, starting a new thread.
+     */
+    protected function pastHalfLife(Entry $entry): bool
+    {
+        $retention = $this->retentionMs();
+
+        return $retention !== null && $this->now() - Entry::tsSeconds($entry->ts) * 1000 > intdiv($retention, 2);
     }
 
     protected function previewOf(string $value): string
