@@ -36,6 +36,12 @@ class FakeSlack
     /** @var list<string> */
     protected array $failures = [];
 
+    /** @var list<int|string> HTTP statuses to answer with, or 'disconnect' */
+    protected array $outages = [];
+
+    /** @var list<string> */
+    public array $scopes = ['chat:write', 'channels:read', 'channels:history', 'channels:join', 'channels:manage'];
+
     /** @var array<string, list<callable(array<string, mixed>): void>> */
     protected array $hooks = [];
 
@@ -66,6 +72,26 @@ class FakeSlack
     {
         $this->rateLimits = $times;
         $this->retryAfter = $retryAfter;
+
+        return $this;
+    }
+
+    /**
+     * Answer the next `$times` calls with an HTTP server error.
+     */
+    public function serverError(int $times = 1, int $status = 500): self
+    {
+        array_push($this->outages, ...array_fill(0, $times, $status));
+
+        return $this;
+    }
+
+    /**
+     * Drop the connection on the next `$times` calls.
+     */
+    public function disconnect(int $times = 1): self
+    {
+        array_push($this->outages, ...array_fill(0, $times, 'disconnect'));
 
         return $this;
     }
@@ -199,6 +225,14 @@ class FakeSlack
         if (! empty($this->hooks[$method])) {
             $hook = array_shift($this->hooks[$method]);
             $hook($params);
+        }
+
+        if ($this->outages !== []) {
+            $outage = array_shift($this->outages);
+
+            return $outage === 'disconnect'
+                ? Factory::failedConnection('cURL error 7: Failed to connect to slack.com')($request)
+                : Factory::response(['ok' => false, 'error' => 'internal_error'], (int) $outage);
         }
 
         if ($this->failures !== []) {
@@ -454,7 +488,7 @@ class FakeSlack
      */
     protected function ok(array $data): PromiseInterface
     {
-        return Factory::response(['ok' => true] + $data);
+        return Factory::response(['ok' => true] + $data, 200, $this->isBot ? ['x-oauth-scopes' => implode(',', $this->scopes)] : []);
     }
 
     protected function error(string $error): PromiseInterface

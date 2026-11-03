@@ -2,7 +2,11 @@
 
 namespace HelgeSverre\SlackCache\Slack;
 
+use Closure;
+use HelgeSverre\SlackCache\Events\SlackRateLimited;
+use HelgeSverre\SlackCache\Events\SlackRequestRetrying;
 use HelgeSverre\SlackCache\Exceptions\SlackApiException;
+use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Support\Sleep;
@@ -16,6 +20,7 @@ class SlackApi
 
     /**
      * @param  array<string, string>  $headers  Extra request headers (a proxy header, or the `d` cookie a browser session token needs).
+     * @param  (Closure(): ?Dispatcher)|null  $events
      */
     public function __construct(
         protected HttpFactory $http,
@@ -24,7 +29,52 @@ class SlackApi
         protected int $retries = 5,
         protected array $headers = [],
         protected string $baseUrl = self::BASE_URL,
+        protected ?Closure $events = null,
     ) {}
+
+    /** @var list<string>|null */
+    protected ?array $scopes = null;
+
+    /**
+     * The OAuth scopes Slack reported on the last response, or null if it did not say (browser session tokens).
+     *
+     * @return list<string>|null
+     */
+    public function scopes(): ?array
+    {
+        return $this->scopes;
+    }
+
+    /**
+     * Resolves the event dispatcher at dispatch time, so Event::fake() in a test sees the events.
+     *
+     * @return (Closure(): ?Dispatcher)|null
+     */
+    public function events(): ?Closure
+    {
+        return $this->events;
+    }
+
+    protected function dispatch(object $event): void
+    {
+        if ($this->events !== null) {
+            ($this->events)()?->dispatch($event);
+        }
+    }
+
+    /**
+     * What kind of token this is, by prefix.
+     */
+    public function tokenType(): string
+    {
+        return match (true) {
+            str_starts_with($this->token, 'xoxb-') => 'bot',
+            str_starts_with($this->token, 'xoxp-') => 'user',
+            str_starts_with($this->token, 'xoxc-') => 'browser session',
+            str_starts_with($this->token, 'xoxe') => 'configuration',
+            default => 'unknown',
+        };
+    }
 
     /**
      * Call a Web API method. Waits out HTTP 429s using Slack's Retry-After header.
@@ -59,18 +109,36 @@ class SlackApi
                     ->asForm()
                     ->post($this->baseUrl.$method, $form);
             } catch (ConnectionException $e) {
+                if ($attempt < $this->retries) {
+                    $this->backOff($method, 'connection_failed', ++$attempt);
+
+                    continue;
+                }
+
                 throw new SlackApiException($method, 'connection_failed', $e);
             }
 
             if ($response->status() === 429 && $attempt < $this->retries) {
                 $attempt++;
-                Sleep::for(max(1, (int) ($response->header('Retry-After') ?: 1)))->seconds();
+                $retryAfter = max(1, (int) ($response->header('Retry-After') ?: 1));
+                $this->dispatch(new SlackRateLimited($method, $retryAfter, $attempt));
+                Sleep::for($retryAfter)->seconds();
+
+                continue;
+            }
+
+            if ($response->serverError() && $attempt < $this->retries) {
+                $this->backOff($method, 'http_'.$response->status(), ++$attempt);
 
                 continue;
             }
 
             if (! $response->successful()) {
                 throw new SlackApiException($method, 'http_'.$response->status());
+            }
+
+            if ($response->hasHeader('x-oauth-scopes')) {
+                $this->scopes = array_values(array_filter(array_map('trim', explode(',', $response->header('x-oauth-scopes')))));
             }
 
             $result = $response->json();
@@ -85,5 +153,15 @@ class SlackApi
 
             return $result;
         }
+    }
+
+    /**
+     * Wait before retrying a server error or dropped connection: 1, 2, 4 … seconds, at most 30.
+     */
+    protected function backOff(string $method, string $reason, int $attempt): void
+    {
+        $delay = min(30, 2 ** ($attempt - 1));
+        $this->dispatch(new SlackRequestRetrying($method, $reason, $attempt, $delay));
+        Sleep::for($delay)->seconds();
     }
 }

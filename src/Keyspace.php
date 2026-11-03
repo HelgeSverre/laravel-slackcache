@@ -3,6 +3,8 @@
 namespace HelgeSverre\SlackCache;
 
 use Closure;
+use HelgeSverre\SlackCache\Events\HistoryReplyFailed;
+use HelgeSverre\SlackCache\Events\KeyspaceReloaded;
 use HelgeSverre\SlackCache\Exceptions\SlackApiException;
 use HelgeSverre\SlackCache\Exceptions\TextMismatchException;
 use HelgeSverre\SlackCache\Slack\Channel;
@@ -11,6 +13,7 @@ use HelgeSverre\SlackCache\Slack\Owner;
 use HelgeSverre\SlackCache\Slack\SlackApi;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\Carbon;
 
 /**
@@ -36,6 +39,7 @@ class Keyspace
      * @param  list<string>  $channelNames
      * @param  int|null  $syncInterval  Seconds before the replica re-reads the channel. Null: only on a cold replica.
      * @param  int|null  $retentionDays  Days until Slack hides a message (90 on the free plan). Null: forever.
+     * @param  (Closure(): ?Dispatcher)|null  $events
      */
     public function __construct(
         protected SlackApi $api,
@@ -44,6 +48,7 @@ class Keyspace
         protected ?int $syncInterval = 30,
         protected ?int $retentionDays = 90,
         protected bool $history = false,
+        protected ?Closure $events = null,
     ) {
         $this->namespace = 'slackcache:'.substr(sha1(implode(',', $channelNames)), 0, 12);
     }
@@ -144,9 +149,7 @@ class Keyspace
             ));
         } catch (\Throwable $e) {
             // The new value is stored. A missing history reply is not worth failing the write over.
-            if (function_exists('report')) {
-                report($e);
-            }
+            $this->dispatch(new HistoryReplyFailed($old->key, $e));
         }
 
         return $entry;
@@ -173,6 +176,13 @@ class Keyspace
         $retention = $this->retentionMs();
 
         return $retention !== null && $this->now() - Entry::tsSeconds($entry->ts) * 1000 > intdiv($retention, 2);
+    }
+
+    protected function dispatch(object $event): void
+    {
+        if ($this->events !== null) {
+            ($this->events)()?->dispatch($event);
+        }
     }
 
     protected function previewOf(string $value): string
@@ -212,6 +222,7 @@ class Keyspace
 
     protected function reload(): int
     {
+        $started = hrtime(true);
         $previous = $this->generation();
         $generation = $this->nextGeneration();
 
@@ -267,6 +278,7 @@ class Keyspace
         $this->replica->forget($this->namespace.':loading');
         $this->markSynced();
         $this->dropGeneration($previous);
+        $this->dispatch(new KeyspaceReloaded($this->channelNames, $live, intdiv(hrtime(true) - $started, 1_000_000)));
 
         foreach ($stale as $entry) {
             $this->deleteMessage($this->channels()[$entry->shard], $entry->ts);

@@ -15,6 +15,7 @@ use Illuminate\Cache\CacheManager;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\Encryption\StringEncrypter;
+use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Foundation\Console\AboutCommand;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -122,6 +123,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
             retries: (int) ($config['retries'] ?? 5),
             headers: (array) ($config['headers'] ?? []),
             baseUrl: rtrim((string) ($config['base_url'] ?? SlackApi::BASE_URL), '/').'/',
+            events: fn () => $app->bound('events') ? $app->make(Dispatcher::class) : null,
         );
 
         $replica = self::replica($app, $config, $cache);
@@ -172,6 +174,7 @@ class SlackCacheServiceProvider extends PackageServiceProvider
                 ? ($config['retention_days'] === null ? null : (int) $config['retention_days'])
                 : 90,
             history: $history,
+            events: $api->events(),
         );
     }
 
