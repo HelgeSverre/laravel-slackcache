@@ -30,7 +30,10 @@ class SlackCacheCard extends Card
             'reloads' => $this->aggregate('slackcache_reload', ['count', 'avg', 'max'], 'count'),
         ], 'totals');
 
-        return View::make('slackcache::pulse.card', [
+        /** @var view-string $view */
+        $view = 'slackcache::pulse.card';
+
+        return View::make($view, [
             'calls' => $calls,
             'time' => $time,
             'runAt' => $runAt,
