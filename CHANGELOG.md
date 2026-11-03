@@ -2,6 +2,15 @@
 
 All notable changes to `laravel-slackcache` will be documented in this file.
 
+## v0.4.0 - 2026-11-03
+
+### Added
+
+- `history` option: overwrites edit the key's message in place and post the previous value as a reply in its thread. Deleting a key deletes its thread first, so Slack leaves no placeholder.
+- `slackcache:keys {pattern}`: list live keys matching a glob pattern, like Redis `KEYS`, read from the channel.
+- `FakeSlack` supports `chat.update`, thread replies (`replies()`), `conversations.replies` and Slack's deleted-parent placeholders.
+- Live smoke test for version history.
+
 ## v0.3.0 - 2026-11-03
 
 ### Added

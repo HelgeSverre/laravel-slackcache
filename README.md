@@ -82,6 +82,7 @@ SLACKCACHE_TOKEN=xoxb-...
 | `sync_interval` | `30` | Seconds before the replica re-reads the channel to pick up other servers' writes. `null`: only when the replica is cold. |
 | `retention_days` | `90` | When Slack hides a message. Keys without a TTL expire then. On a paid plan, set it to `null`. |
 | `shards` | `1` | Spread keys over `channel-1` … `channel-N`. See [Sharding](#sharding). |
+| `history` | `false` | Keep previous values in each key's thread. See [Version history](#version-history). |
 | `lock_channel` | none | Keep locks in a channel of their own, e.g. `slackcache-locks`. See [Locks](#locks). |
 | `prefix` | `cache.prefix` | Key prefix, as for other stores. |
 | `timeout` | `60` | HTTP timeout in seconds. A throttled write can take several. |
@@ -125,6 +126,7 @@ Numbers are stored as plain text, like Laravel's Redis store. Everything else is
 php artisan slackcache:load       # Rebuild the replica from the channel history
 php artisan slackcache:reap       # Delete the messages of expired keys (20 per run, like Redis)
 php artisan slackcache:info       # Channels and settings, in the style of Redis INFO
+php artisan slackcache:keys       # List live keys matching a pattern, like Redis KEYS
 php artisan slackcache:manifest   # Print the Slack app manifest
 ```
 
@@ -198,6 +200,55 @@ php artisan cache:clear slack --locks   # Laravel 13
 ```
 
 Without `lock_channel`, `flushLocks()` throws, as Laravel's own stores do when locks share the cache.
+
+## Version history
+
+Set `'history' => true` and overwriting a key edits its message in place instead of replacing it. The previous value goes into the message's thread:
+
+```php
+Cache::store('slack')->forever('config', ['theme' => 'light']);
+Cache::store('slack')->forever('config', ['theme' => 'dark']);
+```
+
+```
+SET `laravel-cache-config` · no TTL (the free plan evicts it in 90 days)
+{
+    "theme": "dark"
+}
+  └ 1 reply
+    Previous value, replaced 2026-11-03 13:41:07 UTC:
+    {
+        "theme": "light"
+    }
+```
+
+Every write, increment and `touch` adds a reply. The channel still holds one message per key, since thread replies do not appear in the channel history. You get an audit log for the price of a second API call per write.
+
+Notes:
+
+- With history on, a write is `chat.update` plus a thread reply, so it takes about twice as long. If Slack stores different text than was sent, the driver puts the previous value back and throws.
+- Deleting a key deletes its thread first. Slack would otherwise keep a "This message was deleted." placeholder for the thread. That is one extra history read per delete.
+- An edit does not change a message's Slack timestamp. If two servers with separate replicas write the same key, the message created later wins, not the one edited later.
+- Turning history off later leaves existing threads in place. Deleting those keys then leaves Slack's placeholder. Flush with history on first if this matters to you.
+
+## Listing keys
+
+`slackcache:keys` lists live keys matching a glob pattern, the way Redis `KEYS` does. It supports `*`, `?` and `[abc]` and leaves out the store prefix:
+
+```bash
+php artisan slackcache:keys 'user:*'
+```
+
+```
+   WARN  KEYS reads the whole channel history. Redis advises against KEYS in production. So do we.
+
+user:1
+user:2
+
+   INFO  2 keys.
+```
+
+It reads the channel rather than the replica, so it also shows keys other servers wrote since your last sync.
 
 ## Works with the rest of Laravel
 
@@ -324,6 +375,8 @@ expect($slack->latest('slackcache')['text'])->toStartWith('slackcache:v1');
 
 $slack->rateLimit(times: 2, retryAfter: 3); // The next two calls get HTTP 429
 $slack->fail('channel_not_found');          // The next call fails
+$slack->replies('slackcache', $ts);         // A message's thread, with `history` on
+$slack->beforeNext('conversations.history', fn () => /* interleave another process */ null);
 ```
 
 ## Development
